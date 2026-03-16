@@ -298,42 +298,201 @@ ensure_merged_model_path() {
   echo "${model_path}"
 }
 
+# ── llama.cpp Installation - Optimized ────────────────────────────────────
+# Priority: 1) System package 2) Prebuilt binary 3) Source build (fallback)
+
 install_llama_cpp() {
   local existing_bin=""
-
+  local USE_PREBUILT="${USE_PREBUILT_LLAMA:-1}"
+  local FORCE_SOURCE="${FORCE_SOURCE_BUILD:-0}"
+  
+  # Priority 1: Check for existing system-wide installation
   existing_bin="$(command -v llama-server 2>/dev/null || true)"
-  if [[ -n "${existing_bin}" && -x "${existing_bin}" ]]; then
+  if [[ -n "${existing_bin}" && -x "${existing_bin}" && "${FORCE_SOURCE}" != "1" ]]; then
     LLAMA_SERVER_BIN="${existing_bin}"
-    log "Using existing llama-server: ${LLAMA_SERVER_BIN}"
+    log "✓ Using system llama-server: ${LLAMA_SERVER_BIN}"
+    ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server 2>/dev/null || true
     return 0
   fi
-
-  if [[ -x "${LLAMA_SERVER_BIN}" ]]; then
-    log "llama.cpp already built."
+  
+  # Priority 2: Check for existing build in standard location
+  if [[ -x "${LLAMA_SERVER_BIN}" && "${FORCE_SOURCE}" != "1" ]]; then
+    log "✓ Using existing llama.cpp build: ${LLAMA_SERVER_BIN}"
     ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server
     return 0
   fi
-
-  log "No existing llama-server found. Building llama.cpp with CUDA support..."
-  if [[ ! -d "${LLAMA_CPP_DIR}/.git" ]]; then
-    git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "${LLAMA_CPP_DIR}"
-  else
-    log "llama.cpp source already present; skipping git update."
+  
+  # Priority 3: Try prebuilt binary from llama.cpp releases
+  if [[ "${USE_PREBUILT}" == "1" && "${FORCE_SOURCE}" != "1" ]]; then
+    if _try_install_prebuilt_llama; then
+      log "✓ Using prebuilt llama-server binary"
+      return 0
+    fi
+    log "⚠ Prebuilt binary not available, falling back to source build..."
   fi
+  
+  # Priority 4: Source build (fallback)
+  log "Building llama.cpp from source (CUDA)..."
+  _build_llama_cpp_from_source || {
+    echo "✗ llama.cpp build failed." >&2
+    return 1
+  }
+  
+  ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server
+  log "✓ llama.cpp ready: ${LLAMA_SERVER_BIN}"
+  return 0
+}
 
+_try_install_prebuilt_llama() {
+  # Try to download prebuilt llama-server binary from GitHub releases
+  # This avoids the ~5-10 minute CUDA build on every instance start
+  
+  local release_url="https://github.com/ggml-org/llama.cpp/releases"
+  local target_dir="${LLAMA_CPP_DIR}"
+  local bin_target="${target_dir}/llama-server"
+  
+  mkdir -p "${target_dir}"
+  
+  # Check if we already downloaded a prebuilt binary
+  if [[ -x "${bin_target}" ]]; then
+    LLAMA_SERVER_BIN="${bin_target}"
+    return 0
+  fi
+  
+  log "Attempting to download prebuilt llama-server binary..."
+  
+  # Try to get latest release info
+  local latest_release
+  latest_release=$(curl -sL -H "Accept: application/json" \
+    "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" 2>/dev/null || echo "")
+  
+  if [[ -z "${latest_release}" ]]; then
+    log "⚠ Could not fetch latest release info"
+    return 1
+  fi
+  
+  # Extract version tag
+  local version_tag
+  version_tag=$(echo "${latest_release}" | jq -r '.tag_name' 2>/dev/null || echo "")
+  
+  if [[ -z "${version_tag}" ]]; then
+    log "⚠ Could not parse version from release info"
+    return 1
+  fi
+  
+  log "Latest llama.cpp release: ${version_tag}"
+  
+  # For CUDA builds, we need to build from source anyway as official releases
+  # typically don't include CUDA binaries. However, we can try to use a 
+  # prebuilt CPU version for testing or fall back to source build.
+  
+  # Alternative: Check if there's a CUDA-enabled binary in releases
+  # (Note: Official releases usually don't have CUDA, but some forks might)
+  local cuda_asset
+  cuda_asset=$(echo "${latest_release}" | jq -r '.assets[] | select(.name | test("cuda|cu[0-9]+")) | .browser_download_url' 2>/dev/null | head -1 || echo "")
+  
+  if [[ -n "${cuda_asset}" ]]; then
+    log "Found CUDA-enabled prebuilt binary"
+    if curl -sL --retry 3 -o "${target_dir}/llama-cuda.tar.gz" "${cuda_asset}" 2>/dev/null; then
+      tar -xzf "${target_dir}/llama-cuda.tar.gz" -C "${target_dir}" 2>/dev/null || true
+      rm -f "${target_dir}/llama-cuda.tar.gz"
+      
+      # Find the extracted binary
+      local extracted_bin
+      extracted_bin=$(find "${target_dir}" -name "llama-server" -type f -executable 2>/dev/null | head -1 || echo "")
+      if [[ -n "${extracted_bin}" && -x "${extracted_bin}" ]]; then
+        LLAMA_SERVER_BIN="${extracted_bin}"
+        return 0
+      fi
+    fi
+  fi
+  
+  # No suitable prebuilt binary found
+  # Clean up any partial downloads
+  rm -f "${target_dir}/llama-cuda.tar.gz" 2>/dev/null || true
+  
+  return 1
+}
+
+_build_llama_cpp_from_source() {
+  # Source build with optimizations:
+  # - Minimal clone (shallow, no tags)
+  # - Only build llama-server (not all tools)
+  # - Release build with CUDA
+  # - Clean up build artifacts after success
+  
+  log "Cloning llama.cpp (shallow, minimal)..."
+  
+  # Use minimal clone: depth=1, no tags, single branch
+  if [[ ! -d "${LLAMA_CPP_DIR}/.git" ]]; then
+    git clone --depth 1 --no-tags --single-branch \
+      https://github.com/ggml-org/llama.cpp.git "${LLAMA_CPP_DIR}" 2>/dev/null || {
+      log "✗ Failed to clone llama.cpp"
+      return 1
+    }
+  else
+    log "llama.cpp source already present"
+  fi
+  
+  # Check if already built
+  if [[ -x "${LLAMA_SERVER_BIN}" ]]; then
+    log "llama.cpp already built at ${LLAMA_SERVER_BIN}"
+    return 0
+  fi
+  
+  log "Building llama-server with CUDA (this may take 5-10 minutes)..."
+  
+  # Install build dependencies if missing
+  if ! command -v cmake &>/dev/null; then
+    log "Installing cmake..."
+    apt-get update -qq && apt-get install -y -qq cmake >/dev/null 2>&1 || true
+  fi
+  
+  # Configure with minimal options
+  # Only build llama-server, skip tests and examples
   if [[ ! -f "${LLAMA_CPP_BUILD_DIR}/CMakeCache.txt" ]]; then
     cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_BUILD_DIR}" \
       -DGGML_CUDA=ON \
-      -DCMAKE_BUILD_TYPE=Release
+      -DGGML_NATIVE=OFF \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_BUILD_TESTS=OFF \
+      -DGGML_BUILD_EXAMPLES=OFF \
+      -DGGML_BUILD_SERVER=ON \
+      -DCMAKE_INSTALL_PREFIX="${LLAMA_CPP_BUILD_DIR}" \
+      >/dev/null 2>&1 || {
+      log "✗ CMake configuration failed"
+      return 1
+    }
   fi
-  cmake --build "${LLAMA_CPP_BUILD_DIR}" --config Release -j"$(nproc)"
-
-  [[ -x "${LLAMA_SERVER_BIN}" ]] || {
-    echo "✗ llama-server build failed." >&2
+  
+  # Build only llama-server target
+  cmake --build "${LLAMA_CPP_BUILD_DIR}" \
+    --config Release \
+    --target llama-server \
+    -j"$(nproc)" \
+    >/dev/null 2>&1 || {
+    log "✗ Build failed"
     return 1
   }
-  ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server
-  log "llama.cpp ready: ${LLAMA_SERVER_BIN}"
+  
+  # Verify build success
+  if [[ ! -x "${LLAMA_SERVER_BIN}" ]]; then
+    log "✗ llama-server binary not found after build"
+    return 1
+  fi
+  
+  # Optional: Clean build directory to save space
+  # Keep only the binary, remove object files
+  if [[ -d "${LLAMA_CPP_BUILD_DIR}/CMakeFiles" ]]; then
+    log "Cleaning build artifacts to save space..."
+    find "${LLAMA_CPP_BUILD_DIR}" -name "*.o" -delete 2>/dev/null || true
+    rm -rf "${LLAMA_CPP_BUILD_DIR}/CMakeFiles" 2>/dev/null || true
+    rm -f "${LLAMA_CPP_BUILD_DIR}/CMakeCache.txt" 2>/dev/null || true
+  fi
+  
+  log "✓ llama-server built successfully"
+  return 0
 }
 
 install_hf_hub() {
