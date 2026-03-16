@@ -249,7 +249,7 @@ with gr.Blocks(title="SDXL Image-to-Image Studio") as demo:
                     if HAS_LORAS else
                     "LoRA Settings  (no compatible .safetensors found)"
                 ),
-                open=HAS_LORAS,
+                open=False,
             ):
                 if HAS_LORAS:
                     for idx in range(len(COMPATIBLE_LABELS)):
@@ -269,9 +269,29 @@ with gr.Blocks(title="SDXL Image-to-Image Studio") as demo:
                             )
                         lora_inputs.extend([lora_dropdown, lora_scale])
                 else:
+                    # Auch wenn keine LoRAs vorhanden sind, müssen wir die Dropdowns erstellen,
+                    # damit die generate-Funktion die erwartete Anzahl an Parametern erhält
                     gr.Markdown(
                         "_Drop `.safetensors` files into `/opt/models/loras/` and restart the app._"
                     )
+                    # Erstelle mindestens ein leeres Slot-Paar als Platzhalter
+                    with gr.Row():
+                        lora_dropdown = gr.Dropdown(
+                            choices=["None"],
+                            value="None",
+                            label="LoRA Slot 1",
+                            interactive=True,
+                            visible=False,
+                        )
+                        lora_scale = gr.Slider(
+                            0.0, 1.0,
+                            value=0.0,
+                            step=0.05,
+                            label="LoRA Slot 1 Weight",
+                            interactive=True,
+                            visible=False,
+                        )
+                    lora_inputs.extend([lora_dropdown, lora_scale])
                 if INCOMPATIBLE_LORAS:
                     skipped_lines = [
                         f"- `{label}`: {reason}"
