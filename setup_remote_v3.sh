@@ -44,6 +44,7 @@ TEXT_PRO_PORT="${TEXT_PRO_PORT:-8081}"
 TEXT_DEFAULT_MODEL="cesarsal1nas/Huihui-Qwen3.5-35B-A3B-abliterated-Q4_K_M-GGUF"
 TEXT_PRO_DEFAULT_MODEL="lmstudio-community/Llama-4-Scout-17B-16E-Instruct-GGUF"
 IMAGE_DEFAULT_MODEL="stabilityai/stable-diffusion-xl-base-1.0"
+IMAGE_PROMPT_DEFAULT_MODEL="black-forest-labs/FLUX.1-dev"
 VIDEO_DEFAULT_MODEL="Wan-AI/Wan2.1-T2V-14B-Diffusers"
 VIDEO_LORA_DEFAULT_MODEL="Wan-AI/Wan2.1-T2V-14B-Diffusers"
 VIDEO_I2V_DEFAULT_MODEL="Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
@@ -59,6 +60,7 @@ APP_VENV="${APP_DIR}/venv"
 VIDEO_DIR="/opt/video-studio"
 VIDEO_VENV="${VIDEO_DIR}/venv"
 IMAGE_MODEL_DIR="${MODEL_DIR_BASE}/image/model"
+IMAGE_PROMPT_MODEL_DIR="${MODEL_DIR_BASE}/image_prompt/model"
 VIDEO_MODEL_DIR="${MODEL_DIR_BASE}/video/model"
 VIDEO_LORA_MODEL_DIR="${MODEL_DIR_BASE}/video_lora/model"
 VIDEO_I2V_MODEL_DIR="${MODEL_DIR_BASE}/video_i2v/model"
@@ -819,6 +821,31 @@ install_image_env() {
   log "Image python environment ready."
 }
 
+install_image_prompt_env() {
+  log "Preparing image_prompt python environment..."
+  [[ -f "${APP_VENV}/bin/activate" ]] || {
+    mkdir -p "${APP_DIR}"; python3 -m venv "${APP_VENV}"
+  }
+
+  log "Upgrading image_prompt pip..."
+  run_with_heartbeat "Image pip upgrade" "${APP_VENV}/bin/pip" install --upgrade pip -q
+
+  log "Installing image_prompt torch packages..."
+  if ! run_with_heartbeat "Image torch install" \
+    "${APP_VENV}/bin/pip" install torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu121; then
+    log "Falling back to default torch index for image_prompt stack..."
+    run_with_heartbeat "Image torch install (fallback)" \
+      "${APP_VENV}/bin/pip" install torch torchvision torchaudio
+  fi
+
+  log "Installing image_prompt diffusers/gradio packages..."
+  run_with_heartbeat "Image python deps install" "${APP_VENV}/bin/pip" install \
+    "diffusers>=0.32.0" transformers accelerate safetensors peft \
+    huggingface_hub "gradio>=4.0.0" "imageio[ffmpeg]" pillow sentencepiece protobuf
+  log "Image python environment ready."
+}
+
 download_image_loras() {
   local lora_dir="${MODEL_DIR_BASE}/loras"
   local entries
@@ -1176,6 +1203,183 @@ start_image_ui() {
     nohup "${APP_VENV}/bin/python" "${APP_DIR}/app.py" >"${LOG_DIR}/image.log" 2>&1 &
   disown
   wait_for_port "${BIND_ADDR}" "${IMAGE_PORT}" 30 3
+}
+
+write_image_prompt_app_py() {
+  mkdir -p "${APP_DIR}"
+  if [[ -n "${IMAGE_APP_SOURCE}" && -f "${IMAGE_APP_SOURCE}" ]]; then
+    install -m 0644 "${IMAGE_APP_SOURCE}" "${APP_DIR}/app_prompt.py"
+    log "Using uploaded image_prompt app source: ${IMAGE_APP_SOURCE}"
+    return 0
+  fi
+  cat > "${APP_DIR}/app_prompt.py" <<'PY'
+import os, time, torch, gradio as gr
+from pathlib import Path
+from diffusers import FluxPipeline
+
+MODEL_ID = os.environ.get("MODEL_ID")
+DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE    = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+LORA_DIR = Path("/opt/models/loras")
+
+pipe = None
+
+# ── LoRA discovery ────────────────────────────────────────────────────────
+
+def scan_loras():
+    try:
+        if not LORA_DIR.is_dir():
+            return []
+        return sorted(
+            [p for p in LORA_DIR.rglob("*.safetensors") if p.is_file()],
+            key=lambda p: (p.name.lower(), str(p)),
+        )
+    except Exception:
+        return []
+
+LORA_PATHS = scan_loras()
+LORA_CHOICES = [("None", None)] + [(p.name, str(p)) for p in LORA_PATHS]
+
+def generate_image(
+    prompt, negative_prompt,
+    lora_1, w1, lora_2, w2, lora_3, w3, lora_4, w4, lora_5, w5,
+    steps, guidance, seed, width, height
+):
+    global pipe
+    
+    if pipe is None:
+        print(f"[info] Loading Flux model from {MODEL_ID}...", flush=True)
+        pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE)
+        if DEVICE == "cuda":
+            pipe = pipe.to("cuda")
+        print("[info] Model loaded.", flush=True)
+    
+    # Load LoRAs
+    adapters = []
+    weights = []
+    for i, (lora_name, lora_path) in enumerate([
+        (lora_1, w1), (lora_2, w2), (lora_3, w3), (lora_4, w4), (lora_5, w5)
+    ]):
+        if lora_name and lora_name != "None" and lora_path:
+            adapter_name = f"adapter_{i}"
+            try:
+                pipe.load_lora_weights(lora_path, adapter_name=adapter_name, weight_name=Path(lora_path).name)
+                adapters.append(adapter_name)
+                weights.append(float(lora_path.split(":")[-1]) if ":" in str(lora_path) else 0.75)
+                print(f"[info] Loaded LoRA: {lora_name}", flush=True)
+            except Exception as e:
+                print(f"[warn] Failed to load LoRA {lora_name}: {e}", flush=True)
+    
+    if adapters:
+        pipe.set_adapters(adapters, weights)
+        print(f"[info] Active adapters: {adapters}", flush=True)
+    
+    # Generate
+    generator = torch.Generator(device=DEVICE).manual_seed(int(seed) if seed >= 0 else -1)
+    print(f"[info] Generating: {prompt[:80]}...", flush=True)
+    
+    image = pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt if negative_prompt else None,
+        num_inference_steps=steps,
+        guidance_scale=guidance,
+        generator=generator,
+        width=width,
+        height=height,
+    ).images[0]
+    
+    # Unload LoRAs
+    pipe.unload_lora_weights()
+    
+    # Save and return
+    import tempfile
+    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    image.save(temp_file.name, "PNG")
+    
+    info = f"Prompt: {prompt}\nSize: {width}x{height} | Steps: {steps} | Guidance: {guidance} | Seed: {seed}"
+    return temp_file.name, info
+
+# ── UI ────────────────────────────────────────────────────────────────────
+
+with gr.Blocks(title="FLUX.1 Text-to-Image", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🎨 FLUX.1 Text-to-Image Studio")
+    gr.Markdown("Generiere hochwertige Bilder aus Text-Prompts mit FLUX.1-dev")
+    
+    with gr.Row():
+        with gr.Column(scale=1):
+            prompt = gr.Textbox(
+                label="Prompt",
+                placeholder="Beschreibe das Bild...",
+                value="Photorealistic portrait of a stunning woman, elegant dress, cinematic lighting, 8k",
+                lines=3
+            )
+            negative_prompt = gr.Textbox(
+                label="Negative Prompt",
+                value="ugly, deformed, noisy, blurry, low quality, distorted, disfigured, bad anatomy",
+                lines=2
+            )
+            
+            gr.Markdown("### 🎭 LoRAs")
+            lora_components = []
+            for i in range(5):
+                with gr.Row():
+                    lora_drop = gr.Dropdown(
+                        choices=LORA_CHOICES,
+                        value="None",
+                        label=f"LoRA {i+1}"
+                    )
+                    lora_scale = gr.Slider(0, 1, value=0.75, step=0.05, label="Gewicht")
+                    lora_components.extend([lora_drop, lora_scale])
+            
+            gr.Markdown("### ⚙️ Einstellungen")
+            steps = gr.Slider(1, 50, value=28, step=1, label="Steps")
+            guidance = gr.Slider(1, 10, value=3.5, step=0.5, label="Guidance")
+            seed = gr.Number(value=42, precision=0, label="Seed (-1 für zufällig)")
+            with gr.Row():
+                width = gr.Slider(256, 1536, value=1024, step=64, label="Breite")
+                height = gr.Slider(256, 1536, value=1024, step=64, label="Höhe")
+            
+            btn = gr.Button("🚀 Generieren", variant="primary", size="lg")
+        
+        with gr.Column(scale=1):
+            output_image = gr.Image(label="Ergebnis", type="filepath")
+            output_info = gr.Textbox(label="Info", lines=3)
+    
+    btn.click(
+        fn=generate_image,
+        inputs=[prompt, negative_prompt] + lora_components + [steps, guidance, seed, width, height],
+        outputs=[output_image, output_info]
+    )
+    
+    gr.Examples(
+        examples=[
+            ["Photorealistic portrait of a stunning woman, black pageboy haircut, striking blue eyes, cinematic lighting, 8k"],
+            ["Majestic landscape, snow-capped mountains, golden hour, dramatic clouds, photorealistic"],
+            ["Futuristic cityscape at night, neon lights, cyberpunk style, highly detailed"],
+            ["Cozy cabin in the forest, autumn leaves, warm lighting, photorealistic"],
+            ["Elegant fashion portrait, studio lighting, high detail skin texture"],
+        ],
+        inputs=[prompt]
+    )
+
+demo.queue(max_size=10).launch(
+    server_name=os.environ.get("HOST", "127.0.0.1"),
+    server_port=int(os.environ.get("PORT", "7863")),
+    share=False,
+)
+PY
+}
+
+start_image_prompt_ui() {
+  local model_source="$1"
+  if [[ -d "${IMAGE_PROMPT_MODEL_DIR}" && -f "${IMAGE_PROMPT_MODEL_DIR}/model_index.json" ]]; then
+    model_source="${IMAGE_PROMPT_MODEL_DIR}"
+  fi
+  if pgrep -f "${APP_DIR}/app_prompt.py" &>/dev/null; then log "Image Prompt UI running."; return; fi
+  MODEL_ID="${model_source}" HOST="${BIND_ADDR}" PORT="${IMAGE_PROMPT_PORT:-7863}" \
+    nohup "${APP_VENV}/bin/python" "${APP_DIR}/app_prompt.py" >"${LOG_DIR}/image_prompt.log" 2>&1 &
+  disown
+  wait_for_port "${BIND_ADDR}" "${IMAGE_PROMPT_PORT:-7863}" 30 3
 }
 
 pull_hf_model() {
@@ -2139,6 +2343,129 @@ ONSTART
   chmod +x "${ONSTART}"
 }
 
+write_onstart_image_prompt() {
+  local model="$1"
+  local model_source="$model"
+  local image_loras_json_quoted
+  if [[ -d "${IMAGE_PROMPT_MODEL_DIR}" && -f "${IMAGE_PROMPT_MODEL_DIR}/model_index.json" ]]; then
+    model_source="${IMAGE_PROMPT_MODEL_DIR}"
+  fi
+  image_loras_json_quoted="$(python3 - <<'PY'
+import os, shlex
+print(shlex.quote(os.environ.get("IMAGE_LORAS_JSON", "[]")))
+PY
+)"
+  cat > "${ONSTART}" <<ONSTART
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "${LOG_DIR}"
+IMAGE_LORAS_JSON=${image_loras_json_quoted}
+LORA_DIR="${MODEL_DIR_BASE}/loras"
+
+download_image_loras_onstart() {
+  local entries failed=0
+  local failed_names=()
+  mkdir -p "\${LORA_DIR}"
+
+  entries=\$(python3 - <<'PY'
+import json
+import os
+from urllib.parse import urlparse
+
+raw = os.environ.get("IMAGE_LORAS_JSON", "[]")
+try:
+    data = json.loads(raw)
+except Exception:
+    data = []
+
+for item in data:
+    if isinstance(item, str):
+        url = item.strip()
+        if not url:
+            continue
+        name = os.path.basename(urlparse(url).path) or "lora.safetensors"
+        if "." not in os.path.basename(name):
+            name = f"{name}.safetensors"
+        print(f"{url}\t{name}")
+    elif isinstance(item, dict):
+        url = str(item.get("url", "")).strip()
+        if not url:
+            continue
+        name = str(item.get("filename") or item.get("name") or os.path.basename(urlparse(url).path) or "lora.safetensors").strip()
+        if name:
+            if "." not in os.path.basename(name):
+                name = f"{name}.safetensors"
+            print(f"{url}\t{name}")
+PY
+)
+
+  [[ -n "\${entries}" ]] || {
+    echo "[\$(date)] No image LoRAs configured for onstart." >>"${LOG_DIR}/onstart.log"
+    return 0
+  }
+
+  local -a expected_files=()
+  while IFS=\$'\t' read -r _url fname; do
+    [[ -n "\${fname}" ]] && expected_files+=("\${fname}")
+  done <<< "\${entries}"
+
+  if [[ -d "\${LORA_DIR}" ]]; then
+    for existing in "\${LORA_DIR}"/*.safetensors; do
+      [[ -f "\${existing}" ]] || continue
+      local base
+      base="\$(basename "\${existing}")"
+      local keep=0
+      for expected in "\${expected_files[@]}"; do
+        if [[ "\${base}" == "\${expected}" ]]; then
+          keep=1
+          break
+        fi
+      done
+      if [[ "\${keep}" -eq 0 ]]; then
+        echo "[\$(date)] Removing obsolete LoRA: \${base}" >>"${LOG_DIR}/onstart.log"
+        rm -f "\${existing}"
+      fi
+    done
+  fi
+
+  echo "[\$(date)] Ensuring image LoRAs in \${LORA_DIR}..." >>"${LOG_DIR}/onstart.log"
+  while IFS=\$'\t' read -r url filename; do
+    [[ -n "\${url}" && -n "\${filename}" ]] || continue
+    local target="\${LORA_DIR}/\${filename}"
+    local tmp_target="\${target}.part"
+    if [[ -f "\${target}" ]]; then
+      echo "[\$(date)] LoRA already present: \${filename}" >>"${LOG_DIR}/onstart.log"
+      continue
+    fi
+    echo "[\$(date)] Downloading missing LoRA: \${filename}" >>"${LOG_DIR}/onstart.log"
+    rm -f "\${tmp_target}" >/dev/null 2>&1 || true
+    if curl -L --fail --retry 3 --retry-delay 5 -o "\${tmp_target}" "\${url}" >>"${LOG_DIR}/onstart.log" 2>&1; then
+      mv "\${tmp_target}" "\${target}"
+      echo "[\$(date)] LoRA download complete: \${filename}" >>"${LOG_DIR}/onstart.log"
+    else
+      rm -f "\${tmp_target}" >/dev/null 2>&1 || true
+      failed=1
+      failed_names+=("\${filename}")
+      echo "[\$(date)] WARNING: LoRA download failed, skipping: \${filename}" >>"${LOG_DIR}/onstart.log"
+    fi
+  done <<< "\${entries}"
+
+  if [[ "\${failed}" -eq 1 ]]; then
+    echo "[\$(date)] WARNING: Some image LoRAs could not be downloaded: \${failed_names[*]}" >>"${LOG_DIR}/onstart.log"
+  fi
+}
+
+download_image_loras_onstart
+if ! pgrep -f "${APP_DIR}/app_prompt.py" &>/dev/null; then
+  MODEL_ID="${model_source}" PORT="${IMAGE_PROMPT_PORT:-7863}" \\
+    nohup "${APP_VENV}/bin/python" "${APP_DIR}/app_prompt.py" >"${LOG_DIR}/image_prompt.log" 2>&1 &
+  disown
+fi
+echo "[\$(date)] image_prompt stack started." >>"${LOG_DIR}/onstart.log"
+ONSTART
+  chmod +x "${ONSTART}"
+}
+
 write_onstart_video() {
   local stack_name="${1:-video}"
   local script_name log_file port model_source
@@ -2250,6 +2577,18 @@ case "${STACK_TYPE}" in
     start_image_ui "${STACK_MODEL}"
     write_onstart_image "${STACK_MODEL}"
     write_manifest "image" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
+    ;;
+  image_prompt)
+    STACK_MODEL="${STACK_MODEL:-$IMAGE_PROMPT_DEFAULT_MODEL}"
+    STACK_TEMPLATE="${STACK_TEMPLATE:-nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04}"
+    SERVICE_PORT="${SERVICE_PORT:-7863}"
+    install_image_prompt_env
+    download_image_loras
+    write_image_prompt_app_py
+    pull_hf_model "${STACK_MODEL}"
+    start_image_prompt_ui "${STACK_MODEL}"
+    write_onstart_image_prompt "${STACK_MODEL}"
+    write_manifest "image_prompt" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
     ;;
   video)
     STACK_MODEL="${STACK_MODEL:-$VIDEO_DEFAULT_MODEL}"

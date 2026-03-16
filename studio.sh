@@ -539,12 +539,13 @@ get_stack_label() {
   label=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack}', {}).get('label', ''))" 2>/dev/null)
   if [[ -z "$label" ]]; then
     case "$stack" in
-      text)     echo "llama.cpp Text" ;;
-      text_pro) echo "llama.cpp Pro (H100+)" ;;
-      image)    echo "Gradio Image UI" ;;
-      video)    echo "Wan2.1 Video Studio" ;;
-      video_lora) echo "Wan2.1 Video LoRA Studio" ;;
-      *)        echo "$stack" ;;
+      text)        echo "llama.cpp Text" ;;
+      text_pro)    echo "llama.cpp Pro (H100+)" ;;
+      image)       echo "Gradio Image UI" ;;
+      image_prompt) echo "FLUX.1 Text-to-Image" ;;
+      video)       echo "Wan2.1 Video Studio" ;;
+      video_lora)  echo "Wan2.1 Video LoRA Studio" ;;
+      *)           echo "$stack" ;;
     esac
   else
     echo "$label"
@@ -1171,11 +1172,12 @@ show_control_center_help() {
   render_header
   box_menu_start "HILFE / TASTENÜBERSICHT"
   box_menu_item " ${BOLD}Stack-Aktionen (2 Buchstaben):${NC}"
-  box_menu_item "   1. Buchstabe: ${YELLOW}t${NC}=Text  ${YELLOW}p${NC}=Text Pro  ${YELLOW}i${NC}=Bild  ${YELLOW}v${NC}=Video  ${YELLOW}w${NC}=Video LoRA"
+  box_menu_item "   1. Buchstabe: ${YELLOW}t${NC}=Text  ${YELLOW}p${NC}=Text Pro  ${YELLOW}i${NC}=Bild  ${YELLOW}f${NC}=FLUX.1"
+  box_menu_item "                 ${YELLOW}v${NC}=Video  ${YELLOW}w${NC}=Video LoRA"
   box_menu_item "   2. Buchstabe: ${YELLOW}o${NC}=Öffnen  ${YELLOW}r${NC}=Reparieren  ${YELLOW}s${NC}=Starten"
   box_menu_item "                 ${YELLOW}p${NC}=Vorbereiten  ${YELLOW}x${NC}=Löschen  ${YELLOW}c${NC}=Remote zerstören"
   box_menu_item ""
-  box_menu_item "   Beispiele: ${CYAN}to${NC}=Text öffnen  ${CYAN}ir${NC}=Bild reparieren  ${CYAN}ws${NC}=Video LoRA starten"
+  box_menu_item "   Beispiele: ${CYAN}to${NC}=Text öffnen  ${CYAN}ir${NC}=Bild reparieren  ${CYAN}fo${NC}=FLUX.1 öffnen"
   box_menu_item "   Verfügbare Stacks: $(get_available_stacks)"
   box_menu_item ""
   box_menu_item " ${BOLD}Globale Aktionen:${NC}"
@@ -1204,6 +1206,7 @@ handle_control_center_input() {
       t) stack="text" ;;
       p) stack="text_pro" ;;
       i) stack="image" ;;
+      f) stack="image_prompt" ;;
       v) stack="video" ;;
       w) stack="video_lora" ;;
       *)
@@ -2316,7 +2319,7 @@ menu_doctor() {
 
   if [[ -n "$stack" ]]; then
     case "$stack" in
-      text|text_pro|image|video|video_lora) ;;
+      text|text_pro|image|image_prompt|video|video_lora) ;;
       *) print_err "Ungültiger Stack: $stack"; pause; return 1 ;;
     esac
   fi
@@ -2404,13 +2407,14 @@ HELP
 
 menu_stack_actions() {
   local stack="$1" stack_name stack_model
-  
+
   case "$stack" in
-    text)     stack_name="Text" ;;
-    text_pro) stack_name="Text Pro (H100+)" ;;
-    image)    stack_name="Bild" ;;
-    video)    stack_name="Video" ;;
-    video_lora) stack_name="Video LoRA" ;;
+    text)        stack_name="Text" ;;
+    text_pro)    stack_name="Text Pro (H100+)" ;;
+    image)       stack_name="Bild" ;;
+    image_prompt) stack_name="FLUX.1 T2I" ;;
+    video)       stack_name="Video" ;;
+    video_lora)  stack_name="Video LoRA" ;;
   esac
 
   while true; do
@@ -2491,11 +2495,11 @@ interactive_menu() {
     render_status_overview
     box_menu_start "HAUPTMENÜ"
     box_menu_item " ${YELLOW}[1]${NC} Text-UI            ${YELLOW}[2]${NC} Text Pro UI (H100+)  ${YELLOW}[3]${NC} Bild-UI"
-    box_menu_item " ${YELLOW}[4]${NC} Video-UI           ${YELLOW}[5]${NC} Video LoRA UI        ${YELLOW}[6]${NC} Video-Workflow"
-    box_menu_item " ${YELLOW}[7]${NC} Vast-Instanzen     ${YELLOW}[c]${NC} Control Center        ${YELLOW}[d]${NC} Dashboard"
-    box_menu_item " ${YELLOW}[g]${NC} Go (Smart Open)    ${YELLOW}[D]${NC} Doctor               ${YELLOW}[l]${NC} Logs"
-    box_menu_item " ${YELLOW}[R]${NC} Repair             ${YELLOW}[r]${NC} Status aktual        ${YELLOW}[h]${NC} Hilfe"
-    box_menu_item " ${YELLOW}[q]${NC} Beenden"
+    box_menu_item " ${YELLOW}[4]${NC} FLUX.1 T2I         ${YELLOW}[5]${NC} Video-UI             ${YELLOW}[6]${NC} Video LoRA UI"
+    box_menu_item " ${YELLOW}[7]${NC} Video-Workflow     ${YELLOW}[8]${NC} Vast-Instanzen       ${YELLOW}[c]${NC} Control Center"
+    box_menu_item " ${YELLOW}[d]${NC} Dashboard          ${YELLOW}[g]${NC} Go (Smart Open)      ${YELLOW}[D]${NC} Doctor"
+    box_menu_item " ${YELLOW}[l]${NC} Logs               ${YELLOW}[R]${NC} Repair               ${YELLOW}[r]${NC} Status aktual"
+    box_menu_item " ${YELLOW}[h]${NC} Hilfe              ${YELLOW}[q]${NC} Beenden"
     box_menu_end
     echo -ne "${CYAN}Auswahl:${NC} "
     read -r choice
@@ -2503,13 +2507,14 @@ interactive_menu() {
       1) menu_stack_actions text ;;
       2) menu_stack_actions text_pro ;;
       3) menu_stack_actions image ;;
-      4) menu_stack_actions video ;;
-      5) menu_stack_actions video_lora ;;
-      6) menu_video_workflow ;;
-      7) cmd_vast ;;
+      4) menu_stack_actions image_prompt ;;
+      5) menu_stack_actions video ;;
+      6) menu_stack_actions video_lora ;;
+      7) menu_video_workflow ;;
+      8) cmd_vast ;;
       c|C) control_center_menu ;;
       d) cmd_dashboard ;;
-      g|G) read -r -p "Stack (text|text_pro|image|video|video_lora): " s; cmd_go "$s" ;;
+      g|G) read -r -p "Stack (text|text_pro|image|image_prompt|video|video_lora): " s; cmd_go "$s" ;;
       D) menu_doctor ;;
       l|L) read -r -p "Stack: " s; cmd_logs "$s" ;;
       r) print_step "Aktualisiere Status..."; HEALTH_CACHE=(); CACHE_TIMESTAMP=0; refresh_all_stack_states "true"; pause ;;

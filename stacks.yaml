@@ -74,6 +74,33 @@ stacks:
       url: "https://huggingface.co/Xanderjks/lora/resolve/main/SDXL_BetterFaces-LoRA_v1.safetensors"
     - name: "Cinematic Photo"
       url: "https://huggingface.co/jbilcke-hf/sdxl-cinematic-2/resolve/main/pytorch_lora_weights.safetensors"
+  image_prompt:
+    label: FLUX.1 Text-to-Image
+    service_port: 7863
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 7863
+    api_tunnel_port: null
+    required_files:
+    - /onstart.sh
+    - /opt/generative-ui/app_prompt.py
+    required_commands:
+    - python3
+    - pip
+    default_model: black-forest-labs/FLUX.1-dev
+    max_dph: 4.5
+    min_vram_mb: 49152
+    gpu_regex: A6000|A100|H100|H200|L40S|4090
+    loras:
+    - name: "FLUX Realism"
+      url: "https://huggingface.co/alvdansen/sonata-sd3-fp8/resolve/main/dream_shine_flux_lora.safetensors"
+    - name: "Detail Enhancer"
+      url: "https://huggingface.co/shadowl1th/FLUX.1-dev-LoRA-Add_More_Details/resolve/main/add_more_details_flux.safetensors"
+    - name: "Cinematic Look"
+      url: "https://huggingface.co/shadowl1th/FLUX.1-dev-LoRA-Cinematic/resolve/main/cinematic_flux.safetensors"
   video:
     label: Wan2.1 Video Studio
     service_port: 7861
@@ -135,6 +162,12 @@ presets:
     stack: image
     model: stabilityai/stable-diffusion-xl-base-1.0
     notes: "SDXL f\xFCr schnelle Ergebnisse"
+  image-prompt-quality:
+    description: "High-Quality Text-to-Image"
+    stack: image_prompt
+    model: black-forest-labs/FLUX.1-dev
+    min_vram_mb: 49152
+    notes: "FLUX.1-dev f\xFCr beste Prompt-Umsetzung und Details"
   video-quality:
     description: "Hohe Video-Qualit\xE4t"
     stack: video
