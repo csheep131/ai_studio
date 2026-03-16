@@ -848,50 +848,26 @@ def ensure_instance_running(stack: str) -> bool:
 
 
 def wait_for_instance_ssh(stack: str, timeout: int = 180, interval: int = 5) -> bool:
-    """Wait until SSH is reachable."""
+    """
+    Wartet darauf, dass der SSH-Port der Instanz technisch erreichbar ist.
+    Kein Auth-Zwang mit lokalem Key.
+    """
     state, inst = resolve_stack_instance(stack)
     if not state or not inst:
         return False
+
     ip = state.get("INSTANCE_IP")
     port = state.get("INSTANCE_PORT")
     if not ip or not port:
         return False
+
     start = time.time()
     while time.time() - start < timeout:
-        if ssh_check_with_ip_port(ip, port):
+        if ssh_port_reachable(ip, port):
             return True
         time.sleep(interval)
     return False
 
-
-def wait_for_ssh_ready(inst: Instance, timeout: int = 180, interval: int = 5) -> bool:
-    """Wait until SSH is reachable for given Instance object."""
-    if not inst or not inst.ssh_host or not inst.ssh_port:
-        return False
-    
-    start = time.time()
-    last_status = "unknown"
-    
-    while time.time() - start < timeout:
-        if ssh_check_with_ip_port(inst.ssh_host, inst.ssh_port):
-            elapsed = int(time.time() - start)
-            info(f"SSH ready after {elapsed}s")
-            return True
-        
-        # Refresh instance status for better logging
-        try:
-            fresh_inst = find_instance_by_id(inst.id)
-            if fresh_inst:
-                current_status = fresh_inst.status
-                if current_status != last_status:
-                    info(f"Instanz Status: {current_status} ({int(time.time() - start)}s)")
-                    last_status = current_status
-        except Exception:
-            pass
-        
-        time.sleep(interval)
-    
-    return False
 
 
 def ssh_check_with_ip_port(ip: str, port: str) -> bool:
@@ -905,11 +881,43 @@ def ssh_check_with_ip_port(ip: str, port: str) -> bool:
     except Exception:
         return False
 
+def wait_for_ssh_ready(inst: Instance, timeout: int = 180, interval: int = 5) -> bool:
+    """
+    Wartet darauf, dass der SSH-Port technisch erreichbar ist.
+    Das bedeutet NICHT automatisch, dass der aktuelle lokale Client autorisiert ist.
+    """
+    if not inst or not inst.ssh_host or not inst.ssh_port:
+        return False
 
+    start = time.time()
+    last_status = "unknown"
+
+    while time.time() - start < timeout:
+        if ssh_port_reachable(inst.ssh_host, inst.ssh_port):
+            elapsed = int(time.time() - start)
+            info(f"SSH port reachable after {elapsed}s")
+            return True
+
+        try:
+            fresh_inst = find_instance_by_id(inst.id)
+            if fresh_inst:
+                current_status = fresh_inst.status
+                if current_status != last_status:
+                    info(f"Instanz Status: {current_status} ({int(time.time() - start)}s)")
+                    last_status = current_status
+        except Exception:
+            pass
+
+        time.sleep(interval)
+
+    return False
 # ---------- SSH / Remote Checks ----------
 
 def ssh_check(stack: str) -> bool:
-    """Check SSH reachability for stack."""
+    """
+    Prüft, ob DER AKTUELLE Client sich erfolgreich per SSH anmelden kann.
+    Das ist absichtlich ein Auth-Check, nicht nur ein Reachability-Test.
+    """
     state = load_state(stack)
     if not state:
         return False
@@ -917,7 +925,7 @@ def ssh_check(stack: str) -> bool:
     port = state.get("INSTANCE_PORT")
     if not ip or not port:
         return False
-    return ssh_check_with_ip_port(ip, port)
+    return ssh_auth_works_with_ip_port(ip, port)
 
 
 def run_remote(stack: str, command: str, check: bool = False, capture_output: bool = True,
@@ -1458,51 +1466,6 @@ def sync_to(inst: Instance, src: Path, dest: str, delete: bool = False) -> None:
         run([*scp_base(inst), str(src), f"{ssh_target(inst)}:{dest}"])
 
 
-def upload_ssh_key(inst: Instance) -> None:
-    """
-    Upload local SSH public key to remote instance's authorized_keys.
-    Enables passwordless SSH for rsync/scp operations.
-    """
-    # Find local public key
-    local_pub_key = Path.home() / ".ssh" / "id_rsa.pub"
-    if not local_pub_key.exists():
-        local_pub_key = Path.home() / ".ssh" / "id_ed25519.pub"
-    
-    if not local_pub_key.exists():
-        warn("No local SSH public key found. Skipping upload.")
-        return
-    
-    pub_key_content = local_pub_key.read_text().strip()
-    if not pub_key_content:
-        warn("SSH public key is empty. Skipping upload.")
-        return
-    
-    info("Uploading SSH public key to remote instance...")
-    
-    # Create .ssh directory and authorized_keys on remote
-    remote_cmd = (
-        f"mkdir -p ~/.ssh && "
-        f"chmod 700 ~/.ssh && "
-        f"grep -qF {shlex.quote(pub_key_content)} ~/.ssh/authorized_keys 2>/dev/null || "
-        f"echo {shlex.quote(pub_key_content)} >> ~/.ssh/authorized_keys && "
-        f"chmod 600 ~/.ssh/authorized_keys"
-    )
-    
-    try:
-        # Use run_remote which works for jupyter instances via SSH port
-        cp = run_remote_by_ip(
-            inst.ssh_host,
-            inst.ssh_port,
-            remote_cmd,
-            check=False,
-            capture_output=True
-        )
-        if cp.returncode == 0:
-            info("SSH public key uploaded successfully.")
-        else:
-            warn(f"SSH key upload returned {cp.returncode}, but continuing...")
-    except Exception as e:
-        warn(f"SSH key upload failed: {e}. Remote operations may fail.")
 
 
 def run_remote_by_ip(ip: str, port: str, command: str, check: bool = False, 
@@ -1803,14 +1766,53 @@ def cmd_health(args) -> int:
 
 
 def cmd_ssh_check(args) -> int:
-    """SSH reachability test."""
-    ok = ssh_check(args.stack)
-    if args.json:
-        print(json.dumps({"ssh_reachable": ok}, indent=2))
-    else:
-        print("SSH reachable" if ok else "SSH not reachable")
-    return 0 if ok else 1
+    """
+    Liefert getrennt:
+    - ssh_port_reachable
+    - ssh_auth_works
+    """
+    state = load_state(args.stack)
+    if not state:
+        result = {
+            "ssh_port_reachable": False,
+            "ssh_auth_works": False,
+            "error": "no state",
+        }
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print("No state")
+        return 1
 
+    ip = state.get("INSTANCE_IP")
+    port = state.get("INSTANCE_PORT")
+    if not ip or not port:
+        result = {
+            "ssh_port_reachable": False,
+            "ssh_auth_works": False,
+            "error": "missing ip/port",
+        }
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print("Missing IP/PORT")
+        return 1
+
+    port_ok = ssh_port_reachable(ip, port)
+    auth_ok = ssh_auth_works_with_ip_port(ip, port) if port_ok else False
+
+    result = {
+        "ssh_port_reachable": port_ok,
+        "ssh_auth_works": auth_ok,
+    }
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"SSH port reachable: {port_ok}")
+        print(f"SSH auth works:     {auth_ok}")
+
+    return 0 if port_ok else 1
 
 def cmd_remote_file_exists(args) -> int:
     """Check remote file."""
@@ -1875,16 +1877,6 @@ def cmd_instance_status(args) -> int:
 _BLACKLISTED_MACHINE_IDS: set[str] = set()
 
 
-def get_local_ssh_public_key() -> str | None:
-    """Get local SSH public key content."""
-    local_pub_key = Path.home() / ".ssh" / "id_rsa.pub"
-    if not local_pub_key.exists():
-        local_pub_key = Path.home() / ".ssh" / "id_ed25519.pub"
-    
-    if not local_pub_key.exists():
-        return None
-    
-    return local_pub_key.read_text().strip()
 
 
 def create_instance_cli(
@@ -1895,25 +1887,14 @@ def create_instance_cli(
     label: str | None = None,
 ) -> dict:
     """
-    Create instance via vastai CLI - entspricht WebUI RENT button.
-    Fügt automatisch SSH-Key via --onstart-cmd hinzu.
+    Create instance via vastai CLI.
+    WICHTIG:
+    - Kein lokaler SSH-Key wird injiziert.
+    - SSH-Key-Management bleibt vollständig bei Vast.ai Account-Keys.
     runtype: 'jupyter' oder 'ssh'
     """
     _ensure_vastai_config()
-    
-    # SSH-Key laden und als onstart-cmd hinzufügen
-    ssh_pub_key = get_local_ssh_public_key()
-    onstart_cmd = ""
-    if ssh_pub_key:
-        # SSH-Key in authorized_keys einfügen beim Start
-        onstart_cmd = (
-            f"mkdir -p /root/.ssh && "
-            f"chmod 700 /root/.ssh && "
-            f"echo '{ssh_pub_key}' >> /root/.ssh/authorized_keys && "
-            f"chmod 600 /root/.ssh/authorized_keys"
-        )
-    
-    # CLI Flags - ssh und jupyter sind mutually exclusive!
+
     cmd = [
         "vastai", "create", "instance", offer_id,
         "--image", image,
@@ -1921,39 +1902,34 @@ def create_instance_cli(
         "--cancel-unavail",
         "--raw",
     ]
-    
-    # Entweder --ssh ODER --jupyter (nicht beide!)
+
+    # Genau ein Runtype-Flag
     if runtype == "jupyter":
         cmd.append("--jupyter")
     else:
         cmd.append("--ssh")
-    
-    # SSH-Key via onstart-cmd hinzufügen
-    if onstart_cmd:
-        cmd.extend(["--onstart-cmd", onstart_cmd])
-    
+
     if label:
         cmd.extend(["--label", label])
-    
+
     info(f"CLI Befehl: {' '.join(cmd)}")
     cp = run(cmd, check=False, capture=True)
     raw_output = cp.stdout.strip()
     raw_stderr = cp.stderr.strip() if cp.stderr else ""
-    
+
     info(f"CLI STDOUT (full): {raw_output}")
     if raw_stderr:
         info(f"CLI STDERR (full): {raw_stderr}")
-    
-    # JSON ist im stdout nach dem explain output
+
     json_start = raw_output.rfind('{')
     if json_start >= 0:
         json_str = raw_output[json_start:]
     else:
         json_str = raw_output
-    
+
     if cp.returncode != 0:
         raise VastError(f"CLI create failed (code={cp.returncode}): {raw_stderr}")
-    
+
     try:
         result = json.loads(json_str)
         info(f"CLI Response: success={result.get('success')}, new_contract={result.get('new_contract')}")
@@ -1961,7 +1937,42 @@ def create_instance_cli(
     except json.JSONDecodeError as e:
         raise VastError(f"CLI output not JSON: {json_str[:200]}") from e
 
+def ssh_port_reachable(ip: str, port: str, timeout: int = 5) -> bool:
+    """
+    Prüft nur, ob der SSH-Port technisch erreichbar ist.
+    Kein Login, keine Key-Prüfung.
+    """
+    try:
+        with socket.create_connection((ip, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
 
+
+def ssh_auth_works_with_ip_port(ip: str, port: str) -> bool:
+    """
+    Prüft, ob der aktuelle lokale Client sich per SSH authentifizieren kann.
+    Das ist ein Auth-Test, kein reiner Netzwerk-Test.
+    """
+    try:
+        cp = run(
+            [
+                "ssh",
+                "-T",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=5",
+                "-o", "LogLevel=ERROR",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-p", str(port),
+                f"root@{ip}",
+                "bash --noprofile --norc -lc 'echo test'",
+            ],
+            check=False,
+            capture=True,
+        )
+        return cp.returncode == 0
+    except Exception:
+        return False
 def get_daemon_logs(instance_id: str) -> str:
     """Hole Daemon-Logs einer Instanz zur Fehleranalyse."""
     try:
