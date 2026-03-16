@@ -1,0 +1,37 @@
+.env
+.env.*
+!.env.example
+
+# Secrets and local credentials
+.hf_token
+.vastai_key
+.vastai_key_alt
+*.pem
+*.p12
+*.pfx
+*.key
+*.secret
+*.secrets
+
+# Local runtime state
+.vast_instance_*
+.video_workflow_state.json
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local outputs and assets
+video_output/
+master_images/
+*.log
+
+# Archived / non-project files
+zukunft/
+venv/
+generations/
+generations_png/
+video_training_dataset/
+test.jpg

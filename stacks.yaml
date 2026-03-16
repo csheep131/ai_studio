@@ -1,0 +1,155 @@
+stacks:
+  text:
+    label: llama.cpp Text
+    service_port: 8080
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 8080
+    api_remote_port: 8080
+    api_tunnel_port: 11435
+    required_files:
+    - /onstart.sh
+    required_commands:
+    - llama-server
+    - python3
+    default_model: cesarsal1nas/Huihui-Qwen3.5-35B-A3B-abliterated-Q4_K_M-GGUF
+    model_file_hint: huihui-qwen3.5-35b-a3b-abliterated-Q4_K_M.gguf
+    max_dph: 2.5
+    min_vram_mb: 49152
+    gpu_regex: A6000|A100|H100|H200|L40S
+  text_pro:
+    label: llama.cpp Pro (H100+)
+    service_port: 8081
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 8081
+    api_remote_port: 8081
+    api_tunnel_port: 11436
+    required_files:
+    - /onstart.sh
+    required_commands:
+    - llama-server
+    - python3
+    default_model: huihui-ai/Huihui-Qwen3.5-122B-A10B-abliterated-GGUF
+    model_file_hint: Q4_K-GGUF
+    max_dph: 5.0
+    disk_gb: 100
+    min_vram_mb: 81920
+    gpu_regex: H100|H200|B200|B100|GH200
+    requires_h100: true
+  image:
+    label: Gradio Image UI
+    service_port: 7860
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 7860
+    api_tunnel_port: null
+    required_files:
+    - /onstart.sh
+    - /opt/generative-ui/app.py
+    required_commands:
+    - python3
+    - pip
+    default_model: stabilityai/stable-diffusion-xl-base-1.0
+    max_dph: 2.5
+    min_vram_mb: 24000
+    gpu_regex: 4090|3090|A5000|A6000|L40S|A40|A100|H100
+    loras:
+    - name: "SDXL Lightning (Speed)"
+      url: "https://huggingface.co/ByteDance/SDXL-Lightning/resolve/main/sdxl_lightning_4step_lora.safetensors"
+    - name: "Add More Details"
+      url: "https://huggingface.co/Planningo/detail-tweaker-XL/resolve/main/add-detail-xl.safetensors"
+    - name: "Real Dark Contrast"
+      url: "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_offset_example-lora_1.0.safetensors"
+    - name: "BetterFaces (Anti-AI-Look)"
+      url: "https://huggingface.co/Xanderjks/lora/resolve/main/SDXL_BetterFaces-LoRA_v1.safetensors"
+    - name: "Cinematic Photo"
+      url: "https://huggingface.co/jbilcke-hf/sdxl-cinematic-2/resolve/main/pytorch_lora_weights.safetensors"
+  video:
+    label: Wan2.1 Video Studio
+    service_port: 7861
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 7861
+    api_tunnel_port: null
+    required_files:
+    - /onstart.sh
+    - /opt/video-studio/video_ui.py
+    required_commands:
+    - python3
+    - ffmpeg
+    default_model: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    max_dph: 4.5
+    min_vram_mb: 81920
+    gpu_regex: H100|H200|A100|A800
+  video_lora:
+    label: Wan2.1 Video LoRA Studio
+    service_port: 7862
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 7862
+    api_tunnel_port: null
+    required_files:
+    - /onstart.sh
+    - /opt/video-studio/video_lora_ui.py
+    required_commands:
+    - python3
+    - ffmpeg
+    default_model: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    max_dph: 6.0
+    disk_gb: 220
+    min_vram_mb: 81920
+    gpu_regex: H100|H200|B200|GH200
+defaults:
+  disk_gb: 100
+  ssh_port: 22
+  bind_address: 127.0.0.1
+presets:
+  chat:
+    description: Chat / Conversational AI
+    stack: text
+    model: cesarsal1nas/Huihui-Qwen3.5-35B-A3B-abliterated-Q4_K_M-GGUF
+    notes: "Gut f\xFCr allgemeine Chat-Aufgaben"
+  coding:
+    description: Coding Assistant
+    stack: text_pro
+    model: huihui-ai/Huihui-Qwen3.5-122B-A10B-abliterated-GGUF
+    notes: "Ben\xF6tigt H100+ GPU, ideal f\xFCr Code-Generierung"
+  image-fast:
+    description: Schnelle Bild-Generierung
+    stack: image
+    model: stabilityai/stable-diffusion-xl-base-1.0
+    notes: "SDXL f\xFCr schnelle Ergebnisse"
+  video-quality:
+    description: "Hohe Video-Qualit\xE4t"
+    stack: video
+    model: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    min_vram_mb: 81920
+    notes: "Beste Qualit\xE4t, ben\xF6tigt 80GB+ VRAM"
+  video-cheap:
+    description: "G\xFCnstige Video-Generierung"
+    stack: video
+    model: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    max_dph: 3.0
+    notes: "Sucht g\xFCnstigste verf\xFCgbare GPU"
+  video-lora-quality:
+    description: "Video mit LoRA"
+    stack: video_lora
+    model: Wan-AI/Wan2.1-T2V-14B-Diffusers
+    min_vram_mb: 81920
+    notes: "Wan2.1 mit LoRA-Auswahl, H100+ und mehr Disk"

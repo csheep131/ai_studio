@@ -1,0 +1,15 @@
+# Host utilities
+PyYAML
+gradio-client
+
+# Image app / Diffusers runtime
+gradio>=4.0.0
+torch
+diffusers>=0.32.0
+transformers
+accelerate
+safetensors
+Pillow
+
+
+opencv-python
