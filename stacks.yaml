@@ -75,7 +75,7 @@ stacks:
     - name: "Cinematic Photo"
       url: "https://huggingface.co/jbilcke-hf/sdxl-cinematic-2/resolve/main/pytorch_lora_weights.safetensors"
   image_prompt:
-    label: FLUX.1 Text-to-Image
+    label: FLUX.2 Text-to-Image
     service_port: 7863
     health_path: /
     vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
@@ -90,17 +90,18 @@ stacks:
     required_commands:
     - python3
     - pip
-    default_model: black-forest-labs/FLUX.1-dev
+    default_model: black-forest-labs/FLUX.2-dev
     max_dph: 4.5
+    disk_gb: 100
     min_vram_mb: 49152
     gpu_regex: A6000|A100|H100|H200|L40S|4090
     loras:
-    - name: "FLUX Realism"
-      url: "https://huggingface.co/alvdansen/sonata-sd3-fp8/resolve/main/dream_shine_flux_lora.safetensors"
-    - name: "Detail Enhancer"
-      url: "https://huggingface.co/shadowl1th/FLUX.1-dev-LoRA-Add_More_Details/resolve/main/add_more_details_flux.safetensors"
-    - name: "Cinematic Look"
-      url: "https://huggingface.co/shadowl1th/FLUX.1-dev-LoRA-Cinematic/resolve/main/cinematic_flux.safetensors"
+    - name: "FLUX.2 Turbo"
+      filename: "flux2_turbo.safetensors"
+      url: "https://huggingface.co/fal/FLUX.2-dev-Turbo/resolve/main/flux.2-turbo-lora.safetensors"
+    - name: "FLUX.2 Multi Angles"
+      filename: "flux2_multi_angles.safetensors"
+      url: "https://huggingface.co/lovis93/Flux-2-Multi-Angles-LoRA-v2/resolve/main/flux-multi-angles-v2-72poses-fal.safetensors"
   video:
     label: Wan2.1 Video Studio
     service_port: 7861
@@ -142,6 +143,38 @@ stacks:
     disk_gb: 220
     min_vram_mb: 81920
     gpu_regex: H100|H200|B200|GH200
+    loras:
+    - name: "Color Pop"
+      url: "https://huggingface.co/silveroxides/wan2.1-lora-color-pop/resolve/main/color_pop.safetensors"
+    - name: "Cinematic"
+      url: "https://huggingface.co/silveroxides/wan2.1-lora-cinematic/resolve/main/cinematic.safetensors"
+    - name: "Vintage"
+      url: "https://huggingface.co/silveroxides/wan2.1-lora-vintage/resolve/main/vintage.safetensors"
+    - name: "Anime"
+      url: "https://huggingface.co/silveroxides/wan2.1-lora-anime/resolve/main/anime.safetensors"
+  comfyui:
+    label: "ComfyUI Pro Workflows (Flux + SDXL + Custom Nodes)"
+    service_port: 7867
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 7867
+    api_tunnel_port: null
+    required_files:
+    - /onstart.sh
+    - /opt/comfyui/start_comfyui.sh
+    required_commands:
+    - python3
+    - pip
+    - git
+    - ffmpeg
+    default_model: black-forest-labs/FLUX.2-dev
+    max_dph: 4.0
+    disk_gb: 120
+    min_vram_mb: 49152
+    gpu_regex: A6000|A100|H100|H200|L40S|4090|3090
 defaults:
   disk_gb: 100
   ssh_port: 22
@@ -165,9 +198,9 @@ presets:
   image-prompt-quality:
     description: "High-Quality Text-to-Image"
     stack: image_prompt
-    model: black-forest-labs/FLUX.1-dev
+    model: black-forest-labs/FLUX.2-dev
     min_vram_mb: 49152
-    notes: "FLUX.1-dev f\xFCr beste Prompt-Umsetzung und Details"
+    notes: "FLUX.2-dev f\xFCr beste Prompt-Umsetzung und Details"
   video-quality:
     description: "Hohe Video-Qualit\xE4t"
     stack: video

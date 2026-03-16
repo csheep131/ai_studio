@@ -542,7 +542,7 @@ get_stack_label() {
       text)        echo "llama.cpp Text" ;;
       text_pro)    echo "llama.cpp Pro (H100+)" ;;
       image)       echo "Gradio Image UI" ;;
-      image_prompt) echo "FLUX.1 Text-to-Image" ;;
+      image_prompt) echo "FLUX.2 Text-to-Image" ;;
       video)       echo "Wan2.1 Video Studio" ;;
       video_lora)  echo "Wan2.1 Video LoRA Studio" ;;
       *)           echo "$stack" ;;
@@ -1172,12 +1172,12 @@ show_control_center_help() {
   render_header
   box_menu_start "HILFE / TASTENÜBERSICHT"
   box_menu_item " ${BOLD}Stack-Aktionen (2 Buchstaben):${NC}"
-  box_menu_item "   1. Buchstabe: ${YELLOW}t${NC}=Text  ${YELLOW}p${NC}=Text Pro  ${YELLOW}i${NC}=Bild  ${YELLOW}f${NC}=FLUX.1"
+  box_menu_item "   1. Buchstabe: ${YELLOW}t${NC}=Text  ${YELLOW}p${NC}=Text Pro  ${YELLOW}i${NC}=Bild  ${YELLOW}f${NC}=FLUX.2"
   box_menu_item "                 ${YELLOW}v${NC}=Video  ${YELLOW}w${NC}=Video LoRA"
   box_menu_item "   2. Buchstabe: ${YELLOW}o${NC}=Öffnen  ${YELLOW}r${NC}=Reparieren  ${YELLOW}s${NC}=Starten"
   box_menu_item "                 ${YELLOW}p${NC}=Vorbereiten  ${YELLOW}x${NC}=Löschen  ${YELLOW}c${NC}=Remote zerstören"
   box_menu_item ""
-  box_menu_item "   Beispiele: ${CYAN}to${NC}=Text öffnen  ${CYAN}ir${NC}=Bild reparieren  ${CYAN}fo${NC}=FLUX.1 öffnen"
+  box_menu_item "   Beispiele: ${CYAN}to${NC}=Text öffnen  ${CYAN}ir${NC}=Bild reparieren  ${CYAN}fo${NC}=FLUX.2 öffnen"
   box_menu_item "   Verfügbare Stacks: $(get_available_stacks)"
   box_menu_item ""
   box_menu_item " ${BOLD}Globale Aktionen:${NC}"
@@ -1390,14 +1390,23 @@ EOF
 
 # Stack-spezifische Ports
 get_stack_port() {
-  case "$1" in
-    text)     echo 8080 ;;
-    text_pro) echo 8081 ;;
-    image)    echo 7860 ;;
-    video)    echo 7861 ;;
-    video_lora) echo 7862 ;;
-    *)        echo 8080 ;;
-  esac
+  local stack="$1"
+  local port
+  port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack}', {}).get('service_port', ''))" 2>/dev/null || echo "")
+  if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
+    echo "$port"
+  else
+    # Fallback für bekannte Standardwerte
+    case "$stack" in
+      text)     echo 8080 ;;
+      text_pro) echo 8081 ;;
+      image)    echo 7860 ;;
+      image_prompt) echo 7863 ;;
+      video)    echo 7861 ;;
+      video_lora) echo 7862 ;;
+      *)        echo 8080 ;;
+    esac
+  fi
 }
 
 # Prüfe ob Service auf Remote läuft (mit timeout)
@@ -1672,7 +1681,23 @@ is_local_port_free() {
 
 pick_local_port_for_stack() {
   local stack="$1" preferred_port
-  case "$stack" in text) preferred_port=8080 ;; text_pro) preferred_port=8081 ;; image) preferred_port=7860 ;; video) preferred_port=7861 ;; video_lora) preferred_port=7862 ;; esac
+  
+  # Bevorzugten Port aus stacks.yaml holen (local_port oder service_port)
+  preferred_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); print(s.get('local_port', s.get('service_port', '')))" 2>/dev/null || echo "")
+  
+  if [[ -z "$preferred_port" || ! "$preferred_port" =~ ^[0-9]+$ ]]; then
+    case "$stack" in 
+      text) preferred_port=8080 ;; 
+      text_pro) preferred_port=8081 ;; 
+      image) preferred_port=7860 ;; 
+      image_prompt) preferred_port=7863 ;;
+      video)  preferred_port=7861 ;; 
+      video_prompt) preferred_port=7861 ;; 
+      video_lora) preferred_port=7862 ;;
+      *) preferred_port=8080 ;;
+    esac
+  fi
+
   local port=$preferred_port
   for offset in $(seq 0 20); do
     local candidate=$((preferred_port + offset))
@@ -1691,7 +1716,7 @@ open_tunnel_safely() {
   api_remote_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_remote_port', s.get('ollama_remote_port')); print(v if v else '')")
   api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')")
 
-  [[ "$local_port" != "8080" && "$local_port" != "8081" && "$local_port" != "7860" && "$local_port" != "7861" && "$local_port" != "7862" ]] && \
+  [[ "$local_port" != "8080" && "$local_port" != "8081" && "$local_port" != "7860" && "$local_port" != "7861" && "$local_port" != "7862"&& "$local_port" != "7863"  ]] && \
     print_warn "Port $local_port statt Standard."
   print_step "Öffne Tunnel auf Port $local_port..."
   local sf="$(state_file_for "$stack")"
@@ -1717,29 +1742,33 @@ open_tunnel_for_stack() {
 
 stack_local_url() {
   local stack="$1"
-  local api_tunnel_port
-  api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')")
+  local local_port service_port api_tunnel_port
   
-  case "$stack" in
-    text)
-      if [[ -n "$api_tunnel_port" ]]; then
-        echo "http://127.0.0.1:8080 (API: http://127.0.0.1:${api_tunnel_port})"
-      else
-        echo "http://127.0.0.1:8080"
-      fi
-      ;;
-    text_pro)
-      if [[ -n "$api_tunnel_port" ]]; then
-        echo "http://127.0.0.1:8081 (API: http://127.0.0.1:${api_tunnel_port})"
-      else
-        echo "http://127.0.0.1:8081"
-      fi
-      ;;
-    image)    echo "http://127.0.0.1:7860" ;;
-    video)    echo "http://127.0.0.1:7861" ;;
-    video_lora) echo "http://127.0.0.1:7862" ;;
-    *)        echo "-" ;;
-  esac
+  local_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); print(s.get('local_port', s.get('service_port', '')))" 2>/dev/null || echo "")
+  service_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); print(s.get('service_port', ''))" 2>/dev/null || echo "")
+  api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')" 2>/dev/null || echo "")
+
+  if [[ -z "$local_port" || ! "$local_port" =~ ^[0-9]+$ ]]; then
+    case "$stack" in
+      text)     local_port=8080 ;;
+      text_pro) local_port=8081 ;;
+      image)    local_port=7860 ;;
+      image_prompt) local_port=7863 ;;
+      video)    local_port=7861 ;;
+      video_lora) local_port=7862 ;;
+      *)        local_port=8080 ;;
+    esac
+  fi
+
+  if [[ "$stack" == "text" || "$stack" == "text_pro" ]]; then
+    if [[ -n "$api_tunnel_port" ]]; then
+      echo "http://127.0.0.1:${local_port} (API: http://127.0.0.1:${api_tunnel_port})"
+    else
+      echo "http://127.0.0.1:${local_port}"
+    fi
+  else
+    echo "http://127.0.0.1:${local_port}"
+  fi
 }
 
 # ---------- Helper ----------
@@ -2412,7 +2441,7 @@ menu_stack_actions() {
     text)        stack_name="Text" ;;
     text_pro)    stack_name="Text Pro (H100+)" ;;
     image)       stack_name="Bild" ;;
-    image_prompt) stack_name="FLUX.1 T2I" ;;
+    image_prompt) stack_name="FLUX.2 T2I" ;;
     video)       stack_name="Video" ;;
     video_lora)  stack_name="Video LoRA" ;;
   esac
@@ -2495,7 +2524,7 @@ interactive_menu() {
     render_status_overview
     box_menu_start "HAUPTMENÜ"
     box_menu_item " ${YELLOW}[1]${NC} Text-UI            ${YELLOW}[2]${NC} Text Pro UI (H100+)  ${YELLOW}[3]${NC} Bild-UI"
-    box_menu_item " ${YELLOW}[4]${NC} FLUX.1 T2I         ${YELLOW}[5]${NC} Video-UI             ${YELLOW}[6]${NC} Video LoRA UI"
+    box_menu_item " ${YELLOW}[4]${NC} FLUX.2 T2I         ${YELLOW}[5]${NC} Video-UI             ${YELLOW}[6]${NC} Video LoRA UI"
     box_menu_item " ${YELLOW}[7]${NC} Video-Workflow     ${YELLOW}[8]${NC} Vast-Instanzen       ${YELLOW}[c]${NC} Control Center"
     box_menu_item " ${YELLOW}[d]${NC} Dashboard          ${YELLOW}[g]${NC} Go (Smart Open)      ${YELLOW}[D]${NC} Doctor"
     box_menu_item " ${YELLOW}[l]${NC} Logs               ${YELLOW}[R]${NC} Repair               ${YELLOW}[r]${NC} Status aktual"

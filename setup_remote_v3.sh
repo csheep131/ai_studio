@@ -40,14 +40,16 @@ IMAGE_PORT="${IMAGE_PORT:-7860}"
 VIDEO_PORT="${VIDEO_PORT:-7861}"
 VIDEO_LORA_PORT="${VIDEO_LORA_PORT:-7862}"
 TEXT_PRO_PORT="${TEXT_PRO_PORT:-8081}"
+COMFYUI_PORT="${COMFYUI_PORT:-7867}"
 
 TEXT_DEFAULT_MODEL="cesarsal1nas/Huihui-Qwen3.5-35B-A3B-abliterated-Q4_K_M-GGUF"
 TEXT_PRO_DEFAULT_MODEL="lmstudio-community/Llama-4-Scout-17B-16E-Instruct-GGUF"
 IMAGE_DEFAULT_MODEL="stabilityai/stable-diffusion-xl-base-1.0"
-IMAGE_PROMPT_DEFAULT_MODEL="black-forest-labs/FLUX.1-dev"
+IMAGE_PROMPT_DEFAULT_MODEL="black-forest-labs/FLUX.2-dev"
 VIDEO_DEFAULT_MODEL="Wan-AI/Wan2.1-T2V-14B-Diffusers"
 VIDEO_LORA_DEFAULT_MODEL="Wan-AI/Wan2.1-T2V-14B-Diffusers"
 VIDEO_I2V_DEFAULT_MODEL="Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
+COMFYUI_DEFAULT_MODEL="black-forest-labs/FLUX.2-dev"
 
 WEBUI_DIR="/opt/open-webui"
 WEBUI_VENV="${WEBUI_DIR}/venv"
@@ -64,6 +66,9 @@ IMAGE_PROMPT_MODEL_DIR="${MODEL_DIR_BASE}/image_prompt/model"
 VIDEO_MODEL_DIR="${MODEL_DIR_BASE}/video/model"
 VIDEO_LORA_MODEL_DIR="${MODEL_DIR_BASE}/video_lora/model"
 VIDEO_I2V_MODEL_DIR="${MODEL_DIR_BASE}/video_i2v/model"
+COMFYUI_DIR="/opt/comfyui"
+COMFYUI_VENV="${COMFYUI_DIR}/venv"
+COMFYUI_MODEL_DIR="${MODEL_DIR_BASE}/comfyui/model"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 mkdir -p "${LOG_DIR}"
@@ -453,6 +458,21 @@ if needs_cleanup and os.path.isdir(model_dir):
     print(f"[hf] removing old model dir {model_dir}", file=sys.stderr, flush=True)
     shutil.rmtree(model_dir, ignore_errors=True)
     os.makedirs(model_dir, exist_ok=True)
+else:
+    # Cleanup individual ggufs that don't match the new expected ones
+    for old_gguf in existing_ggufs:
+        base_name = os.path.basename(old_gguf)
+        is_expected = False
+        for expected in selected_basenames:
+            if base_name == expected:
+                is_expected = True
+                break
+        if not is_expected and base_name != merged_basename:
+            print(f"[hf] removing old model file {old_gguf}", file=sys.stderr, flush=True)
+            try:
+                os.remove(old_gguf)
+            except OSError:
+                pass
 
 primary_path = ""
 selected_for_download = list(selected)
@@ -830,20 +850,110 @@ install_image_prompt_env() {
   log "Upgrading image_prompt pip..."
   run_with_heartbeat "Image pip upgrade" "${APP_VENV}/bin/pip" install --upgrade pip -q
 
-  log "Installing image_prompt torch packages..."
+  log "Installing image_prompt torch packages (CUDA 12.4)..."
   if ! run_with_heartbeat "Image torch install" \
     "${APP_VENV}/bin/pip" install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu121; then
-    log "Falling back to default torch index for image_prompt stack..."
+    --index-url https://download.pytorch.org/whl/cu124; then
+    log "Falling back to CUDA 12.1 for image_prompt stack..."
     run_with_heartbeat "Image torch install (fallback)" \
-      "${APP_VENV}/bin/pip" install torch torchvision torchaudio
+      "${APP_VENV}/bin/pip" install torch torchvision torchaudio \
+      --index-url https://download.pytorch.org/whl/cu121
   fi
 
   log "Installing image_prompt diffusers/gradio packages..."
   run_with_heartbeat "Image python deps install" "${APP_VENV}/bin/pip" install \
     "diffusers>=0.32.0" transformers accelerate safetensors peft \
-    huggingface_hub "gradio>=4.0.0" "imageio[ffmpeg]" pillow sentencepiece protobuf
+    huggingface_hub "gradio>=4.0.0" "imageio[ffmpeg]" pillow sentencepiece protobuf \
+    xformers einops
   log "Image python environment ready."
+}
+
+install_comfyui_env() {
+  log "Preparing ComfyUI python environment..."
+  mkdir -p "${COMFYUI_DIR}" "${MODEL_DIR_BASE}/loras"
+  [[ -f "${COMFYUI_VENV}/bin/activate" ]] || python3 -m venv "${COMFYUI_VENV}"
+
+  log "Upgrading ComfyUI pip..."
+  run_with_heartbeat "ComfyUI pip upgrade" "${COMFYUI_VENV}/bin/pip" install --upgrade pip -q
+
+  log "Installing ComfyUI torch packages (CUDA 12.4)..."
+  if ! run_with_heartbeat "ComfyUI torch install" \
+    "${COMFYUI_VENV}/bin/pip" install torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu124; then
+    log "Falling back to CUDA 12.1 for ComfyUI stack..."
+    run_with_heartbeat "ComfyUI torch install (fallback)" \
+      "${COMFYUI_VENV}/bin/pip" install torch torchvision torchaudio \
+      --index-url https://download.pytorch.org/whl/cu121
+  fi
+
+  log "Installing ComfyUI and custom nodes dependencies..."
+  run_with_heartbeat "ComfyUI python deps install" "${COMFYUI_VENV}/bin/pip" install \
+    "diffusers>=0.32.0" transformers accelerate safetensors peft \
+    huggingface_hub "gradio>=4.0.0" "imageio[ffmpeg]" pillow sentencepiece protobuf \
+    xformers einops opencv-python-headless scikit-image scipy \
+    comfyui-frontend-package comfyui-comfy-package
+
+  if [[ ! -d "${COMFYUI_DIR}/ComfyUI/.git" ]]; then
+    log "Cloning ComfyUI repository (shallow clone, no history)..."
+    git clone --depth 1 --single-branch https://github.com/comfyanonymous/ComfyUI.git "${COMFYUI_DIR}/ComfyUI"
+  else
+    log "ComfyUI source already present; skipping git update."
+  fi
+
+  log "ComfyUI python environment ready."
+}
+
+get_diffusers_allow_patterns() {
+  local model_id="$1"
+  local stack_kind="$2"
+  
+  case "${model_id}" in
+    black-forest-labs/FLUX.2-dev|black-forest-labs/FLUX.1-dev)
+      cat <<PATTERNS
+model_index.json
+scheduler/*
+text_encoder/*
+tokenizer/*
+transformer/*
+PATTERNS
+      ;;
+    stabilityai/stable-diffusion-xl-base-1.0)
+      cat <<PATTERNS
+model_index.json
+scheduler/*
+text_encoder/*
+text_encoder_2/*
+tokenizer/*
+tokenizer_2/*
+unet/*
+vae/*
+feature_extractor/*
+PATTERNS
+      ;;
+    Wan-AI/Wan2.1-T2V-14B-Diffusers|Wan-AI/Wan2.1-I2V-14B-720P-Diffusers)
+      cat <<PATTERNS
+model_index.json
+scheduler/*
+tokenizer*/*
+text_encoder*/*
+transformer/*
+vae/*
+feature_extractor/*
+image_encoder/*
+PATTERNS
+      ;;
+    *)
+      cat <<PATTERNS
+model_index.json
+scheduler/*
+text_encoder*/*
+tokenizer*/*
+transformer/*
+unet/*
+vae/*
+PATTERNS
+      ;;
+  esac
 }
 
 download_image_loras() {
@@ -927,14 +1037,29 @@ PY
     fi
     log "Downloading LoRA: ${filename}"
     rm -f "${tmp_target}" >/dev/null 2>&1 || true
-    if curl -L --fail --retry 3 --retry-delay 5 -o "${tmp_target}" "${url}"; then
-      mv "${tmp_target}" "${target}"
-      log "LoRA download complete: ${filename}"
+    if [[ -n "${HF_TOKEN:-}" ]]; then
+      if curl -L --fail --retry 3 --retry-delay 5 \
+        -H "Authorization: Bearer ${HF_TOKEN}" \
+        -o "${tmp_target}" "${url}"; then
+        mv "${tmp_target}" "${target}"
+        log "LoRA download complete: ${filename}"
+      else
+        rm -f "${tmp_target}" >/dev/null 2>&1 || true
+        failed=1
+        failed_names+=("${filename}")
+        log "WARNING: LoRA download failed, skipping: ${filename}"
+      fi
     else
-      rm -f "${tmp_target}" >/dev/null 2>&1 || true
-      failed=1
-      failed_names+=("${filename}")
-      log "WARNING: LoRA download failed, skipping: ${filename}"
+      if curl -L --fail --retry 3 --retry-delay 5 \
+        -o "${tmp_target}" "${url}"; then
+        mv "${tmp_target}" "${target}"
+        log "LoRA download complete: ${filename}"
+      else
+        rm -f "${tmp_target}" >/dev/null 2>&1 || true
+        failed=1
+        failed_names+=("${filename}")
+        log "WARNING: LoRA download failed, skipping: ${filename}"
+      fi
     fi
   done <<< "${entries}"
 
@@ -1213,13 +1338,16 @@ write_image_prompt_app_py() {
     return 0
   fi
   cat > "${APP_DIR}/app_prompt.py" <<'PY'
-import os, time, torch, gradio as gr
+import os
+import time
+import torch
+import gradio as gr
 from pathlib import Path
 from diffusers import FluxPipeline
 
 MODEL_ID = os.environ.get("MODEL_ID")
-DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE    = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
 LORA_DIR = Path("/opt/models/loras")
 
 pipe = None
@@ -1239,72 +1367,132 @@ def scan_loras():
 
 LORA_PATHS = scan_loras()
 LORA_CHOICES = [("None", None)] + [(p.name, str(p)) for p in LORA_PATHS]
+HAS_LORAS = bool(LORA_PATHS)
+
+def load_pipeline():
+    global pipe
+    if pipe is not None:
+        return pipe
+    
+    print(f"[info] Loading Flux model from {MODEL_ID}...", flush=True)
+    t0 = time.time()
+    
+    # Load FluxPipeline with optimized settings for better compatibility
+    pipe = FluxPipeline.from_pretrained(
+        MODEL_ID,
+        torch_dtype=DTYPE,
+        use_safetensors=True,
+    )
+    
+    # Enable memory optimizations
+    if DEVICE == "cuda":
+        # Enable xformers or sdp for better performance
+        try:
+            pipe.enable_xformers_memory_efficient_attention()
+            print("[info] xformers attention enabled", flush=True)
+        except Exception:
+            try:
+                pipe.enable_attention_slicing()
+                print("[info] attention slicing enabled", flush=True)
+            except Exception:
+                pass
+        
+        # Enable VAE slicing for large images
+        try:
+            pipe.enable_vae_slicing()
+            print("[info] VAE slicing enabled", flush=True)
+        except Exception:
+            pass
+    
+    pipe = pipe.to(DEVICE)
+    elapsed = time.time() - t0
+    print(f"[info] Model loaded in {elapsed:.1f}s", flush=True)
+    return pipe
 
 def generate_image(
     prompt, negative_prompt,
     lora_1, w1, lora_2, w2, lora_3, w3, lora_4, w4, lora_5, w5,
     steps, guidance, seed, width, height
 ):
-    global pipe
+    pipeline = load_pipeline()
     
-    if pipe is None:
-        print(f"[info] Loading Flux model from {MODEL_ID}...", flush=True)
-        pipe = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=DTYPE)
-        if DEVICE == "cuda":
-            pipe = pipe.to("cuda")
-        print("[info] Model loaded.", flush=True)
-    
-    # Load LoRAs
+    # Load LoRAs if selected
     adapters = []
     weights = []
-    for i, (lora_name, lora_path) in enumerate([
+    lora_pairs = [
         (lora_1, w1), (lora_2, w2), (lora_3, w3), (lora_4, w4), (lora_5, w5)
-    ]):
-        if lora_name and lora_name != "None" and lora_path:
-            adapter_name = f"adapter_{i}"
-            try:
-                pipe.load_lora_weights(lora_path, adapter_name=adapter_name, weight_name=Path(lora_path).name)
-                adapters.append(adapter_name)
-                weights.append(float(lora_path.split(":")[-1]) if ":" in str(lora_path) else 0.75)
-                print(f"[info] Loaded LoRA: {lora_name}", flush=True)
-            except Exception as e:
-                print(f"[warn] Failed to load LoRA {lora_name}: {e}", flush=True)
+    ]
+    
+    for i, (lora_name, lora_weight) in enumerate(lora_pairs):
+        if lora_name and lora_name != "None":
+            # Find the path for this LoRA
+            lora_path = None
+            for path in LORA_PATHS:
+                if path.name == lora_name:
+                    lora_path = str(path)
+                    break
+            
+            if lora_path:
+                adapter_name = f"adapter_{i}"
+                try:
+                    pipeline.load_lora_weights(lora_path, adapter_name=adapter_name)
+                    adapters.append(adapter_name)
+                    weights.append(float(w1) if i == 0 else float(w2) if i == 1 else float(w3) if i == 2 else float(w4) if i == 3 else float(w5))
+                    print(f"[info] Loaded LoRA: {lora_name} (weight={weights[-1]})", flush=True)
+                except Exception as e:
+                    print(f"[warn] Failed to load LoRA {lora_name}: {e}", flush=True)
     
     if adapters:
-        pipe.set_adapters(adapters, weights)
-        print(f"[info] Active adapters: {adapters}", flush=True)
+        pipeline.set_adapters(adapters, adapter_weights=weights)
+        print(f"[info] Active adapters: {adapters} with weights {weights}", flush=True)
     
-    # Generate
-    generator = torch.Generator(device=DEVICE).manual_seed(int(seed) if seed >= 0 else -1)
-    print(f"[info] Generating: {prompt[:80]}...", flush=True)
+    # Prepare generator
+    actual_seed = int(seed) if seed >= 0 else torch.randint(0, 2**31, (1,)).item()
+    generator = torch.Generator(device=DEVICE).manual_seed(actual_seed)
     
-    image = pipe(
+    print(f"[info] Generating: {prompt[:80]}... (steps={steps}, guidance={guidance}, size={width}x{height})", flush=True)
+    t0 = time.time()
+    
+    # Generate image
+    output = pipeline(
         prompt=prompt,
-        negative_prompt=negative_prompt if negative_prompt else None,
+        negative_prompt=negative_prompt if negative_prompt and negative_prompt.strip() else None,
         num_inference_steps=steps,
         guidance_scale=guidance,
         generator=generator,
         width=width,
         height=height,
-    ).images[0]
+    )
     
-    # Unload LoRAs
-    pipe.unload_lora_weights()
+    image = output.images[0]
+    elapsed = time.time() - t0
+    
+    # Unload LoRAs after generation
+    if adapters:
+        pipeline.unload_lora_weights()
+        print("[info] LoRAs unloaded", flush=True)
     
     # Save and return
     import tempfile
     temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     image.save(temp_file.name, "PNG")
     
-    info = f"Prompt: {prompt}\nSize: {width}x{height} | Steps: {steps} | Guidance: {guidance} | Seed: {seed}"
+    active_loras = []
+    for i, (name, _) in enumerate(lora_pairs):
+        if name and name != "None":
+            active_loras.append(name)
+    
+    lora_info = f" | LoRAs: {', '.join(active_loras)}" if active_loras else " | No LoRA"
+    info = f"Prompt: {prompt}\nSize: {width}x{height} | Steps: {steps} | Guidance: {guidance} | Seed: {actual_seed}{lora_info}\nTime: {elapsed:.1f}s | Device: {DEVICE}"
     return temp_file.name, info
 
 # ── UI ────────────────────────────────────────────────────────────────────
 
-with gr.Blocks(title="FLUX.1 Text-to-Image", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🎨 FLUX.1 Text-to-Image Studio")
-    gr.Markdown("Generiere hochwertige Bilder aus Text-Prompts mit FLUX.1-dev")
-    
+with gr.Blocks(title="FLUX.2 Text-to-Image", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🎨 FLUX.2 Text-to-Image Studio")
+    gr.Markdown("Generiere hochwertige Bilder aus Text-Prompts mit FLUX.2-dev")
+    gr.Markdown(f"**Model:** `{MODEL_ID}` | **Device:** `{DEVICE}` | **LoRAs available:** {len(LORA_PATHS)}")
+
     with gr.Row():
         with gr.Column(scale=1):
             prompt = gr.Textbox(
@@ -1314,23 +1502,34 @@ with gr.Blocks(title="FLUX.1 Text-to-Image", theme=gr.themes.Soft()) as demo:
                 lines=3
             )
             negative_prompt = gr.Textbox(
-                label="Negative Prompt",
+                label="Negative Prompt (optional)",
                 value="ugly, deformed, noisy, blurry, low quality, distorted, disfigured, bad anatomy",
                 lines=2
             )
-            
-            gr.Markdown("### 🎭 LoRAs")
-            lora_components = []
-            for i in range(5):
-                with gr.Row():
-                    lora_drop = gr.Dropdown(
-                        choices=LORA_CHOICES,
-                        value="None",
-                        label=f"LoRA {i+1}"
-                    )
-                    lora_scale = gr.Slider(0, 1, value=0.75, step=0.05, label="Gewicht")
-                    lora_components.extend([lora_drop, lora_scale])
-            
+
+            if HAS_LORAS:
+                gr.Markdown("### 🎭 LoRAs (optional)")
+                lora_components = []
+                for i in range(5):
+                    with gr.Row():
+                        lora_drop = gr.Dropdown(
+                            choices=LORA_CHOICES,
+                            value="None",
+                            label=f"LoRA {i+1}"
+                        )
+                        lora_scale = gr.Slider(0, 1, value=0.75, step=0.05, label="Gewicht")
+                        lora_components.extend([lora_drop, lora_scale])
+            else:
+                gr.Markdown("### 🎭 LoRAs")
+                gr.Markdown("_Keine LoRAs gefunden. Lege `.safetensors` Dateien nach `/opt/models/loras/` und starte neu._")
+                # Add hidden dummy components to keep parameter count consistent
+                lora_components = []
+                for i in range(5):
+                    with gr.Row(visible=False):
+                        lora_drop = gr.Dropdown(choices=["None"], value="None", label=f"LoRA {i+1}")
+                        lora_scale = gr.Slider(0, 1, value=0, step=0.05, label="Gewicht")
+                        lora_components.extend([lora_drop, lora_scale])
+
             gr.Markdown("### ⚙️ Einstellungen")
             steps = gr.Slider(1, 50, value=28, step=1, label="Steps")
             guidance = gr.Slider(1, 10, value=3.5, step=0.5, label="Guidance")
@@ -1338,19 +1537,19 @@ with gr.Blocks(title="FLUX.1 Text-to-Image", theme=gr.themes.Soft()) as demo:
             with gr.Row():
                 width = gr.Slider(256, 1536, value=1024, step=64, label="Breite")
                 height = gr.Slider(256, 1536, value=1024, step=64, label="Höhe")
-            
+
             btn = gr.Button("🚀 Generieren", variant="primary", size="lg")
-        
+
         with gr.Column(scale=1):
             output_image = gr.Image(label="Ergebnis", type="filepath")
-            output_info = gr.Textbox(label="Info", lines=3)
-    
+            output_info = gr.Textbox(label="Info", lines=4)
+
     btn.click(
         fn=generate_image,
         inputs=[prompt, negative_prompt] + lora_components + [steps, guidance, seed, width, height],
         outputs=[output_image, output_info]
     )
-    
+
     gr.Examples(
         examples=[
             ["Photorealistic portrait of a stunning woman, black pageboy haircut, striking blue eyes, cinematic lighting, 8k"],
@@ -1382,86 +1581,154 @@ start_image_prompt_ui() {
   wait_for_port "${BIND_ADDR}" "${IMAGE_PROMPT_PORT:-7863}" 30 3
 }
 
+start_comfyui_ui() {
+  local model_source="$1"
+  if [[ -d "${COMFYUI_MODEL_DIR}" && -f "${COMFYUI_MODEL_DIR}/model_index.json" ]]; then
+    model_source="${COMFYUI_MODEL_DIR}"
+  fi
+  if pgrep -f "main.py.*--listen" &>/dev/null || pgrep -f "comfyui.*--port" &>/dev/null; then
+    log "ComfyUI already running."
+    return
+  fi
+  log "Starting ComfyUI on ${BIND_ADDR}:${COMFYUI_PORT}..."
+  cd "${COMFYUI_DIR}/ComfyUI"
+  MODEL_PATH="${model_source}" \
+    nohup "${COMFYUI_VENV}/bin/python" main.py \
+      --listen "${BIND_ADDR}" \
+      --port "${COMFYUI_PORT}" \
+      --output-directory "${COMFYUI_DIR}/output" \
+      --temp-directory "${COMFYUI_DIR}/temp" \
+      --input-directory "${COMFYUI_DIR}/input" \
+      --disable-auto-launch \
+      >"${LOG_DIR}/comfyui.log" 2>&1 &
+  disown
+  wait_for_port "${BIND_ADDR}" "${COMFYUI_PORT}" 60 5
+}
+
+write_start_comfyui_script() {
+  mkdir -p "${COMFYUI_DIR}"
+  cat > "${COMFYUI_DIR}/start_comfyui.sh" <<'ONSTART'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_DIR="/var/log/stack"
+BIND_ADDR="127.0.0.1"
+COMFYUI_PORT="${COMFYUI_PORT:-7867}"
+COMFYUI_DIR="/opt/comfyui"
+COMFYUI_VENV="${COMFYUI_DIR}/venv"
+MODEL_PATH="${MODEL_PATH:-/opt/models/comfyui/model}"
+
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+mkdir -p "${LOG_DIR}" "${COMFYUI_DIR}/output" "${COMFYUI_DIR}/temp" "${COMFYUI_DIR}/input"
+
+log "=== Starting ComfyUI ==="
+
+if ! pgrep -f "main.py.*--listen" &>/dev/null; then
+  cd "${COMFYUI_DIR}/ComfyUI"
+  nohup "${COMFYUI_VENV}/bin/python" main.py \
+    --listen "${BIND_ADDR}" \
+    --port "${COMFYUI_PORT}" \
+    --output-directory "${COMFYUI_DIR}/output" \
+    --temp-directory "${COMFYUI_DIR}/temp" \
+    --input-directory "${COMFYUI_DIR}/input" \
+    --disable-auto-launch \
+    >"${LOG_DIR}/comfyui.log" 2>&1 &
+  disown
+fi
+
+ready=0
+for i in $(seq 1 60); do
+  if curl -sf "http://${BIND_ADDR}:${COMFYUI_PORT}" >/dev/null 2>&1; then
+    log "ComfyUI ready on port ${COMFYUI_PORT}"
+    ready=1
+    break
+  fi
+  if (( i == 1 || i % 10 == 0 )); then
+    log "ComfyUI noch nicht bereit (${i}s). Log: ${LOG_DIR}/comfyui.log"
+  fi
+  sleep 1
+done
+
+if (( ready == 1 )); then
+  log "ComfyUI started."
+else
+  log "ComfyUI noch im Start. Pruefe ${LOG_DIR}/comfyui.log"
+fi
+ONSTART
+  chmod +x "${COMFYUI_DIR}/start_comfyui.sh"
+  log "Created ${COMFYUI_DIR}/start_comfyui.sh for ComfyUI stack."
+}
+
+# ── Safe HuggingFace Download Helper ─────────────────────────────────────
+# Uses hf_safe_download.py for safe, controlled downloads
+
+pull_hf_model_safe() {
+  local model_id="$1"
+  local stack_name="${2:-image}"
+  local target_dir
+  target_dir="$(diffusers_model_dir_for_stack "${stack_name}")"
+  local max_size_gb=40
+  
+  # Model-specific limits
+  case "${model_id}" in
+    black-forest-labs/FLUX.2-dev|black-forest-labs/FLUX.1-dev)
+      max_size_gb=50
+      log "[hf] FLUX model: max ${max_size_gb}GB (NO vae, NO image_encoder)"
+      ;;
+    Wan-AI/Wan2.1-T2V-14B-Diffusers|Wan-AI/Wan2.1-I2V-14B-720P-Diffusers)
+      max_size_gb=45
+      log "[hf] Wan2.1 model: max ${max_size_gb}GB"
+      ;;
+    stabilityai/stable-diffusion-xl-base-1.0)
+      max_size_gb=20
+      log "[hf] SDXL model: max ${max_size_gb}GB"
+      ;;
+    *)
+      log "[hf] Unknown model: using default max ${max_size_gb}GB"
+      ;;
+  esac
+  
+  log "Downloading model: ${model_id}"
+  log "Target: ${target_dir}"
+  log "Max size: ${max_size_gb}GB"
+  
+  # Use the safe download Python module
+  MODEL_ID="${model_id}" TARGET_DIR="${target_dir}" MAX_SIZE_GB="${max_size_gb}" \
+    HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}" \
+    "${APP_VENV:-${VIDEO_VENV}}/bin/python" "${SCRIPT_DIR:-/root}/hf_safe_download.py" \
+    --model "${model_id}" \
+    --output "${target_dir}" \
+    --max-size-gb "${max_size_gb}" \
+    ${VERBOSE:+--verbose}
+  
+  local rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    log "✓ Model download complete: ${model_id}"
+    return 0
+  else
+    log "✗ Model download failed: ${model_id}"
+    return 1
+  fi
+}
+
 pull_hf_model() {
   [[ "${PULL_MODEL}" == "1" ]] || return
-  log "Downloading HF model: ${1}..."
+  log "Downloading HF model: ${1} (safe download with size check)..."
   if [[ -n "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}" ]]; then
-    log "[hf] token detected for image model download"
+    log "[hf] token detected for model download"
   else
-    log "[hf] token missing for image model download"
+    log "[hf] token missing for model download"
   fi
   local model_id="$1"
-  local target_dir
-  target_dir="$(diffusers_model_dir_for_stack image)"
-  local tries=8
-  local attempt
-  for attempt in $(seq 1 "$tries"); do
-    log "HF snapshot attempt ${attempt}/${tries} for ${model_id}..."
-    MODEL_ID="${model_id}" STACK_KIND="image" TARGET_DIR="${target_dir}" HF_TOKEN="${HF_TOKEN:-}" HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-${HF_TOKEN:-}}" \
-      HF_HUB_DOWNLOAD_TIMEOUT=1200 HF_HUB_ETAG_TIMEOUT=120 HF_HUB_ENABLE_HF_TRANSFER=1 HF_HUB_DISABLE_PROGRESS_BARS=1 \
-      "${APP_VENV}/bin/python" - <<'PY' &
-import os
-import sys
-from pathlib import Path
-from huggingface_hub import login, snapshot_download
-
-model_id = os.environ["MODEL_ID"]
-stack_kind = os.environ["STACK_KIND"]
-target_dir = os.environ["TARGET_DIR"]
-token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or "").strip()
-if token:
-    os.environ["HF_TOKEN"] = token
-    os.environ["HUGGINGFACE_HUB_TOKEN"] = token
-    login(token=token, add_to_git_credential=False, skip_if_logged_in=False)
-    print(f"[hf-python] image token length={len(token)}", file=sys.stderr, flush=True)
-else:
-    print("[hf-python] image token missing in downloader", file=sys.stderr, flush=True)
-
-Path(target_dir).mkdir(parents=True, exist_ok=True)
-allow_patterns = None
-if stack_kind == "image" and model_id == "stabilityai/stable-diffusion-xl-base-1.0":
-    allow_patterns = [
-        "model_index.json",
-        "scheduler/*",
-        "text_encoder/*",
-        "text_encoder_2/*",
-        "tokenizer/*",
-        "tokenizer_2/*",
-        "unet/*",
-        "vae/*",
-        "feature_extractor/*",
-    ]
-    print("[hf-python] using curated SDXL download set", file=sys.stderr, flush=True)
-
-snapshot_download(
-    repo_id=model_id,
-    token=token or None,
-    max_workers=4,
-    local_dir=target_dir,
-    allow_patterns=allow_patterns,
-)
-print(f"Image model downloaded to {target_dir}.")
-PY
-    local dl_pid=$!
-    while kill -0 "$dl_pid" >/dev/null 2>&1; do
-      local sz=""
-      sz="$(du -sh "${target_dir}" 2>/dev/null | awk '{print $1}' || true)"
-      log "HF model dir progress: ${sz:-0}"
-      sleep 20
-    done
-
-    if wait "$dl_pid"; then
-      log "Model download complete: ${model_id}"
-      return 0
-    fi
-
-    local sleep_s=$(( attempt * 20 ))
-    log "HF download failed on attempt ${attempt}. Retrying in ${sleep_s}s..."
-    sleep "${sleep_s}"
-  done
-
-  echo "✗ Model download failed after ${tries} attempts: ${model_id}" >&2
-  return 1
+  local stack_name="image"
+  if [[ "${model_id}" == "${IMAGE_PROMPT_DEFAULT_MODEL}" ]] || [[ "${STACK_TYPE}" == "image_prompt" ]]; then
+    stack_name="image_prompt"
+  elif [[ "${model_id}" == "${COMFYUI_DEFAULT_MODEL}" ]] || [[ "${STACK_TYPE}" == "comfyui" ]]; then
+    stack_name="comfyui"
+  fi
+  
+  pull_hf_model_safe "${model_id}" "${stack_name}"
+  return $?
 }
 
 # ── VIDEO (v3: fully automated Wan2.1 in-process) ────────────────────────
@@ -1499,157 +1766,21 @@ install_video_env() {
 
 pull_video_model() {
   [[ "${PULL_MODEL}" == "1" ]] || return
-  log "Downloading video model: ${1} (curated files only)..."
-  if [[ -n "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}" ]]; then
-    log "[hf] token detected for video model download"
-  else
-    log "[hf] token missing for video model download"
-  fi
+  log "Downloading video model: ${1} (safe download with size check)..."
   local model_id="$1"
   local stack_name="${2:-video}"
-  local target_dir
-  target_dir="$(diffusers_model_dir_for_stack "${stack_name}")"
-
-  # Be tolerant to transient HF/network errors: resume + retry with backoff.
-  local tries=8
-  local attempt
-  for attempt in $(seq 1 "$tries"); do
-    log "HF snapshot attempt ${attempt}/${tries} for ${model_id}..."
-    MODEL_ID="${model_id}" STACK_KIND="${stack_name}" TARGET_DIR="${target_dir}" HF_TOKEN="${HF_TOKEN:-}" HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-${HF_TOKEN:-}}" \
-      HF_HUB_DOWNLOAD_TIMEOUT=1200 HF_HUB_ETAG_TIMEOUT=120 HF_HUB_ENABLE_HF_TRANSFER=1 \
-      "${VIDEO_VENV}/bin/python" <<'PY' &
-import os
-import sys
-from pathlib import Path
-from huggingface_hub import login, snapshot_download
-
-model_id = os.environ["MODEL_ID"]
-stack_kind = os.environ["STACK_KIND"]
-target_dir = os.environ["TARGET_DIR"]
-token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or "").strip()
-if token:
-    os.environ["HF_TOKEN"] = token
-    os.environ["HUGGINGFACE_HUB_TOKEN"] = token
-    login(token=token, add_to_git_credential=False, skip_if_logged_in=False)
-    print(f"[hf-python] video token length={len(token)}", file=sys.stderr, flush=True)
-else:
-    print("[hf-python] video token missing in downloader", file=sys.stderr, flush=True)
-
-Path(target_dir).mkdir(parents=True, exist_ok=True)
-allow_patterns = [
-    "model_index.json",
-    "scheduler/*",
-    "tokenizer*/*",
-    "text_encoder*/*",
-    "transformer/*",
-    "vae/*",
-    "feature_extractor/*",
-    "image_encoder/*",
-]
-print(f"[hf-python] curated diffusers set for {stack_kind}", file=sys.stderr, flush=True)
-snapshot_download(
-    repo_id=model_id,
-    token=token or None,
-    max_workers=4,
-    local_dir=target_dir,
-    allow_patterns=allow_patterns,
-)
-print(f"Video model downloaded to {target_dir}.")
-PY
-    local dl_pid=$!
-    while kill -0 "$dl_pid" >/dev/null 2>&1; do
-      local sz=""
-      sz="$(du -sh "${target_dir}" 2>/dev/null | awk '{print $1}' || true)"
-      log "HF model dir progress: ${sz:-0}"
-      sleep 20
-    done
-
-    if wait "$dl_pid"; then
-      log "Model download complete: ${model_id}"
-      return 0
-    fi
-
-    local sleep_s=$(( attempt * 20 ))
-    log "HF download failed on attempt ${attempt}. Retrying in ${sleep_s}s..."
-    sleep "${sleep_s}"
-  done
-
-  echo "✗ Model download failed after ${tries} attempts: ${model_id}" >&2
-  return 1
+  
+  pull_hf_model_safe "${model_id}" "${stack_name}"
+  return $?
 }
 
 pull_video_i2v_model() {
   [[ "${PULL_MODEL}" == "1" ]] || return
-  log "Downloading video I2V model: ${1} (curated files only)..."
-  if [[ -n "${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}" ]]; then
-    log "[hf] token detected for video I2V model download"
-  else
-    log "[hf] token missing for video I2V model download"
-  fi
+  log "Downloading video I2V model: ${1} (safe download with size check)..."
   local model_id="$1"
-  local target_dir
-  target_dir="$(diffusers_model_dir_for_stack video_i2v)"
-  local tries=8 attempt
-  for attempt in $(seq 1 "$tries"); do
-    log "HF I2V snapshot attempt ${attempt}/${tries} for ${model_id}..."
-    MODEL_ID="${model_id}" STACK_KIND="video_i2v" TARGET_DIR="${target_dir}" HF_TOKEN="${HF_TOKEN:-}" HUGGINGFACE_HUB_TOKEN="${HUGGINGFACE_HUB_TOKEN:-${HF_TOKEN:-}}" \
-      HF_HUB_DOWNLOAD_TIMEOUT=1200 HF_HUB_ETAG_TIMEOUT=120 HF_HUB_ENABLE_HF_TRANSFER=1 \
-      "${VIDEO_VENV}/bin/python" <<'PY' &
-import os
-import sys
-from pathlib import Path
-from huggingface_hub import login, snapshot_download
-
-model_id = os.environ["MODEL_ID"]
-stack_kind = os.environ["STACK_KIND"]
-target_dir = os.environ["TARGET_DIR"]
-token = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN") or "").strip()
-if token:
-    os.environ["HF_TOKEN"] = token
-    os.environ["HUGGINGFACE_HUB_TOKEN"] = token
-    login(token=token, add_to_git_credential=False, skip_if_logged_in=False)
-    print(f"[hf-python] video i2v token length={len(token)}", file=sys.stderr, flush=True)
-else:
-    print("[hf-python] video i2v token missing in downloader", file=sys.stderr, flush=True)
-
-Path(target_dir).mkdir(parents=True, exist_ok=True)
-allow_patterns = [
-    "model_index.json",
-    "scheduler/*",
-    "tokenizer*/*",
-    "text_encoder*/*",
-    "transformer/*",
-    "vae/*",
-    "feature_extractor/*",
-    "image_encoder/*",
-]
-print(f"[hf-python] curated diffusers set for {stack_kind}", file=sys.stderr, flush=True)
-snapshot_download(
-    repo_id=model_id,
-    token=token or None,
-    max_workers=4,
-    local_dir=target_dir,
-    allow_patterns=allow_patterns,
-)
-print(f"Video I2V model downloaded to {target_dir}.")
-PY
-    local dl_pid=$!
-    while kill -0 "$dl_pid" >/dev/null 2>&1; do
-      local sz=""
-      sz="$(du -sh "${target_dir}" 2>/dev/null | awk '{print $1}' || true)"
-      log "HF model dir progress: ${sz:-0}"
-      sleep 20
-    done
-    if wait "$dl_pid"; then
-      log "I2V model download complete: ${model_id}"
-      return 0
-    fi
-    local sleep_s=$(( attempt * 20 ))
-    log "HF I2V download failed on attempt ${attempt}. Retrying in ${sleep_s}s..."
-    sleep "${sleep_s}"
-  done
-  echo "✗ I2V model download failed after ${tries} attempts: ${model_id}" >&2
-  return 1
+  
+  pull_hf_model_safe "${model_id}" "video_i2v"
+  return $?
 }
 
 write_video_i2v_py() {
@@ -1764,6 +1895,7 @@ diffusers_model_dir_for_stack() {
     video) echo "${VIDEO_MODEL_DIR}" ;;
     video_lora) echo "${VIDEO_LORA_MODEL_DIR}" ;;
     video_i2v) echo "${VIDEO_I2V_MODEL_DIR}" ;;
+    comfyui) echo "${COMFYUI_MODEL_DIR}" ;;
     *) echo "${MODEL_DIR_BASE}/$1/model" ;;
   esac
 }
@@ -2473,10 +2605,126 @@ write_onstart_video() {
   log_file="$(video_log_file_for_stack "${stack_name}")"
   port="$(video_port_for_stack "${stack_name}")"
   model_source="$(diffusers_model_dir_for_stack "${stack_name}")"
+  
+  local image_loras_json_quoted
+  image_loras_json_quoted="$(python3 - <<'PY'
+import os, shlex
+print(shlex.quote(os.environ.get("IMAGE_LORAS_JSON", "[]")))
+PY
+)"
+
   cat > "${ONSTART}" <<ONSTART
 #!/usr/bin/env bash
 set -euo pipefail
 mkdir -p "${LOG_DIR}"
+
+IMAGE_LORAS_JSON=${image_loras_json_quoted}
+LORA_DIR="${MODEL_DIR_BASE}/loras"
+
+download_video_loras_onstart() {
+  local entries failed=0
+  local failed_names=()
+  mkdir -p "\${LORA_DIR}"
+
+  entries=\$(python3 - <<'PY'
+import json
+import os
+from urllib.parse import urlparse
+
+raw = os.environ.get("IMAGE_LORAS_JSON", "[]")
+try:
+    data = json.loads(raw)
+except Exception:
+    data = []
+
+for item in data:
+    if isinstance(item, str):
+        url = item.strip()
+        if not url:
+            continue
+        name = os.path.basename(urlparse(url).path) or "lora.safetensors"
+        if "." not in os.path.basename(name):
+            name = f"{name}.safetensors"
+        print(f"{url}\t{name}")
+    elif isinstance(item, dict):
+        url = str(item.get("url", "")).strip()
+        if not url:
+            continue
+        name = str(item.get("filename") or item.get("name") or os.path.basename(urlparse(url).path) or "lora.safetensors").strip()
+        if name:
+            if "." not in os.path.basename(name):
+                name = f"{name}.safetensors"
+            print(f"{url}\t{name}")
+PY
+  ) || { echo "Failed to parse IMAGE_LORAS_JSON"; return 1; }
+
+  if [[ -z "\${entries}" ]]; then
+    return 0
+  fi
+
+  local -a expected_files=()
+  while IFS=\$'\\t' read -r _url fname; do
+    [[ -n "\${fname}" ]] && expected_files+=("\${fname}")
+  done <<< "\${entries}"
+
+  if [[ -d "\${LORA_DIR}" ]]; then
+    for existing in "\${LORA_DIR}"/*.safetensors; do
+      [[ -f "\${existing}" ]] || continue
+      local base
+      base="\$(basename "\${existing}")"
+      local keep=0
+      for expected in "\${expected_files[@]}"; do
+        if [[ "\${base}" == "\${expected}" ]]; then
+          keep=1
+          break
+        fi
+      done
+      if [[ "\${keep}" -eq 0 ]]; then
+        echo "  [cleanup] Removing obsolete LoRA: \${base}"
+        rm -f "\${existing}"
+      fi
+    done
+  fi
+
+  echo "Downloading LoRAs..."
+  while IFS=\$'\\t' read -r url filename; do
+    [[ -z "\${url}" ]] && continue
+    local out_path="\${LORA_DIR}/\${filename}"
+    if [[ -f "\${out_path}" ]]; then
+      echo "  [skip] \${filename} exists"
+    else
+      echo "  [dl] \${filename} from \${url}..."
+      if [[ -n "\${HF_TOKEN:-}" ]]; then
+        if ! curl -sSL -f -H "Authorization: Bearer \${HF_TOKEN}" "\${url}" -o "\${out_path}.tmp"; then
+          echo "  [error] failed: \${filename}"
+          failed=\$((failed + 1))
+          failed_names+=("\${filename}")
+          rm -f "\${out_path}.tmp"
+        else
+          mv "\${out_path}.tmp" "\${out_path}"
+        fi
+      else
+        if ! curl -sSL -f "\${url}" -o "\${out_path}.tmp"; then
+          echo "  [error] failed: \${filename}"
+          failed=\$((failed + 1))
+          failed_names+=("\${filename}")
+          rm -f "\${out_path}.tmp"
+        else
+          mv "\${out_path}.tmp" "\${out_path}"
+        fi
+      fi
+    fi
+  done <<< "\${entries}"
+
+  if [[ \${failed} -gt 0 ]]; then
+    echo "Warning: \${failed} LoRAs failed to download: \${failed_names[*]}"
+  fi
+}
+
+if [[ "${stack_name}" == "video_lora" ]]; then
+  download_video_loras_onstart
+fi
+
 if ! pgrep -f "${script_name}" &>/dev/null; then
   if [[ -f "${model_source}/model_index.json" ]]; then
     MODEL_ID="${model_source}" VIDEO_UI_HOST="${BIND_ADDR}" VIDEO_UI_PORT="${port}" \\
@@ -2488,6 +2736,155 @@ if ! pgrep -f "${script_name}" &>/dev/null; then
   disown
 fi
 echo "[\$(date)] ${stack_name} stack started." >>"${LOG_DIR}/onstart.log"
+ONSTART
+  chmod +x "${ONSTART}"
+}
+
+write_onstart_comfyui() {
+  local model_source
+  model_source="$(diffusers_model_dir_for_stack comfyui)"
+
+  local image_loras_json_quoted
+  image_loras_json_quoted="$(python3 - <<'PY'
+import os, shlex
+print(shlex.quote(os.environ.get("IMAGE_LORAS_JSON", "[]")))
+PY
+)"
+
+  cat > "${ONSTART}" <<ONSTART
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "${LOG_DIR}"
+
+IMAGE_LORAS_JSON=${image_loras_json_quoted}
+LORA_DIR="${MODEL_DIR_BASE}/loras"
+
+download_comfyui_loras_onstart() {
+  local entries failed=0
+  local failed_names=()
+  mkdir -p "\${LORA_DIR}"
+
+  entries=\$(python3 - <<'PY'
+import json
+import os
+from urllib.parse import urlparse
+
+raw = os.environ.get("IMAGE_LORAS_JSON", "[]")
+try:
+    data = json.loads(raw)
+except Exception:
+    data = []
+
+for item in data:
+    if isinstance(item, str):
+        url = item.strip()
+        if not url:
+            continue
+        name = os.path.basename(urlparse(url).path) or "lora.safetensors"
+        if "." not in os.path.basename(name):
+            name = f"{name}.safetensors"
+        print(f"{url}\t{name}")
+    elif isinstance(item, dict):
+        url = str(item.get("url", "")).strip()
+        if not url:
+            continue
+        name = str(item.get("filename") or item.get("name") or os.path.basename(urlparse(url).path) or "lora.safetensors").strip()
+        if name:
+            if "." not in os.path.basename(name):
+                name = f"{name}.safetensors"
+            print(f"{url}\t{name}")
+PY
+  ) || { echo "Failed to parse IMAGE_LORAS_JSON"; return 1; }
+
+  if [[ -z "\${entries}" ]]; then
+    return 0
+  fi
+
+  local -a expected_files=()
+  while IFS=\$'\\t' read -r _url fname; do
+    [[ -n "\${fname}" ]] && expected_files+=("\${fname}")
+  done <<< "\${entries}"
+
+  if [[ -d "\${LORA_DIR}" ]]; then
+    for existing in "\${LORA_DIR}"/*.safetensors; do
+      [[ -f "\${existing}" ]] || continue
+      local base
+      base="\$(basename "\${existing}")"
+      local keep=0
+      for expected in "\${expected_files[@]}"; do
+        if [[ "\${base}" == "\${expected}" ]]; then
+          keep=1
+          break
+        fi
+      done
+      if [[ "\${keep}" -eq 0 ]]; then
+        echo "  [cleanup] Removing obsolete LoRA: \${base}"
+        rm -f "\${existing}"
+      fi
+    done
+  fi
+
+  echo "Downloading LoRAs..."
+  while IFS=\$'\\t' read -r url filename; do
+    [[ -z "\${url}" ]] && continue
+    local out_path="\${LORA_DIR}/\${filename}"
+    if [[ -f "\${out_path}" ]]; then
+      echo "  [skip] \${filename} exists"
+    else
+      echo "  [dl] \${filename} from \${url}..."
+      if [[ -n "\${HF_TOKEN:-}" ]]; then
+        if ! curl -sSL -f -H "Authorization: Bearer \${HF_TOKEN}" "\${url}" -o "\${out_path}.tmp"; then
+          echo "  [error] failed: \${filename}"
+          failed=\$((failed + 1))
+          failed_names+=("\${filename}")
+          rm -f "\${out_path}.tmp"
+        else
+          mv "\${out_path}.tmp" "\${out_path}"
+        fi
+      else
+        if ! curl -sSL -f "\${url}" -o "\${out_path}.tmp"; then
+          echo "  [error] failed: \${filename}"
+          failed=\$((failed + 1))
+          failed_names+=("\${filename}")
+          rm -f "\${out_path}.tmp"
+        else
+          mv "\${out_path}.tmp" "\${out_path}"
+        fi
+      fi
+    fi
+  done <<< "\${entries}"
+
+  if [[ \${failed} -gt 0 ]]; then
+    echo "Warning: \${failed} LoRAs failed to download: \${failed_names[*]}"
+  fi
+}
+
+download_comfyui_loras_onstart
+
+if ! pgrep -f "main.py.*--listen" &>/dev/null; then
+  if [[ -f "${model_source}/model_index.json" ]]; then
+    MODEL_PATH="${model_source}" \\
+      nohup "${COMFYUI_VENV}/bin/python" "${COMFYUI_DIR}/ComfyUI/main.py" \\
+        --listen "${BIND_ADDR}" \\
+        --port "${COMFYUI_PORT}" \\
+        --output-directory "${COMFYUI_DIR}/output" \\
+        --temp-directory "${COMFYUI_DIR}/temp" \\
+        --input-directory "${COMFYUI_DIR}/input" \\
+        --disable-auto-launch \\
+        >"${LOG_DIR}/comfyui.log" 2>&1 &
+  else
+    nohup "${COMFYUI_VENV}/bin/python" "${COMFYUI_DIR}/ComfyUI/main.py" \\
+      --listen "${BIND_ADDR}" \\
+      --port "${COMFYUI_PORT}" \\
+      --output-directory "${COMFYUI_DIR}/output" \\
+      --temp-directory "${COMFYUI_DIR}/temp" \\
+      --input-directory "${COMFYUI_DIR}/input" \\
+      --disable-auto-launch \\
+      >"${LOG_DIR}/comfyui.log" 2>&1 &
+  fi
+  disown
+fi
+echo "[\$(date)] comfyui stack started." >>"${LOG_DIR}/onstart.log"
 ONSTART
   chmod +x "${ONSTART}"
 }
@@ -2620,6 +3017,17 @@ case "${STACK_TYPE}" in
     write_video_i2v_py "${STACK_MODEL}"
     pull_video_i2v_model "${STACK_MODEL}"
     write_manifest "video_i2v" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
+    ;;
+  comfyui)
+    STACK_MODEL="${STACK_MODEL:-$COMFYUI_DEFAULT_MODEL}"
+    STACK_TEMPLATE="${STACK_TEMPLATE:-nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04}"
+    SERVICE_PORT="${SERVICE_PORT:-7867}"
+    install_comfyui_env
+    write_start_comfyui_script
+    pull_hf_model "${STACK_MODEL}"
+    start_comfyui_ui "${STACK_MODEL}"
+    write_onstart_comfyui
+    write_manifest "comfyui" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
     ;;
   *) echo "Unknown STACK_TYPE: ${STACK_TYPE}"; exit 1;;
 esac

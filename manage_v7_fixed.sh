@@ -481,6 +481,20 @@ ensure_stack_setup() {
     fi
     remote_image_app="/root/image_app.py"
   fi
+  if [[ "$stack" == "image_prompt" ]]; then
+    local image_prompt_app="${SCRIPT_DIR}/generative-ui/app_prompt.py"
+    if [[ -f "${image_prompt_app}" ]]; then
+      print_info "Lade app_prompt.py hoch..."
+      if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
+        "${image_prompt_app}" root@"${INSTANCE_IP}":~/image_prompt_app.py; then
+        print_err "Upload der Image-Prompt-App fehlgeschlagen."
+        return 1
+      fi
+      remote_image_app="/root/image_prompt_app.py"
+    else
+      print_warn "app_prompt.py nicht gefunden: ${image_prompt_app}"
+    fi
+  fi
   
   print_info "Führe remote setup aus (Model: ${stack_model:-default})..."
   local setup_rc=0

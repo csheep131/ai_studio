@@ -17,7 +17,7 @@ if hf_token:
     login(token=hf_token)
 
 # Modell laden
-MODEL_ID = "black-forest-labs/FLUX.1-dev"
+MODEL_ID = os.getenv("MODEL_ID", "black-forest-labs/FLUX.2-dev")
 
 print(f"🚀 Lade {MODEL_ID}...")
 
@@ -131,9 +131,9 @@ def generate_image(
 
 
 # Gradio UI
-with gr.Blocks(title="FLUX.1 Text-to-Image", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🎨 FLUX.1 Text-to-Image Studio")
-    gr.Markdown("Generiere hochwertige Bilder aus Text-Prompts mit FLUX.1-dev")
+with gr.Blocks(title="FLUX.2 Text-to-Image", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🎨 FLUX.2 Text-to-Image Studio")
+    gr.Markdown("Generiere hochwertige Bilder aus Text-Prompts mit FLUX.2-dev")
     
     with gr.Row():
         with gr.Column(scale=1):

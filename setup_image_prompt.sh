@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup_image_prompt.sh - wrapper for the FLUX.1 Text-to-Image setup
+# setup_image_prompt.sh - wrapper for the FLUX.2 Text-to-Image setup
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
