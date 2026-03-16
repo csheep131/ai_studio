@@ -274,12 +274,48 @@ ensure_ssh_reachable() {
   local stack="$1"
   require_state "$stack"
   print_info "Prüfe SSH-Erreichbarkeit ${INSTANCE_IP}:${INSTANCE_PORT}..."
-  if python3 "${VAST_PY}" ssh-check "$stack" --json 2>/dev/null | jq -e '.ssh_reachable == true' >/dev/null; then
-    print_ok "SSH erreichbar."
+
+  # 1. TCP-Port prüfen
+  if command -v nc >/dev/null 2>&1; then
+    if nc -z -w 5 "${INSTANCE_IP}" "${INSTANCE_PORT}" >/dev/null 2>&1; then
+      print_ok "SSH-Port erreichbar."
+    else
+      print_warn "SSH-Port nicht erreichbar."
+      return 1
+    fi
+  else
+    # Fallback mit Python
+    if python3 - <<PY >/dev/null 2>&1
+import socket, sys
+s = socket.socket()
+s.settimeout(5)
+try:
+    s.connect(("${INSTANCE_IP}", int("${INSTANCE_PORT}")))
+    s.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PY
+    then
+      print_ok "SSH-Port erreichbar."
+    else
+      print_warn "SSH-Port nicht erreichbar."
+      return 1
+    fi
+  fi
+
+  # 2. Optional: echter SSH-Handshake/Login-Test
+  if ssh -o BatchMode=yes \
+         -o StrictHostKeyChecking=no \
+         -o UserKnownHostsFile=/dev/null \
+         -o ConnectTimeout=8 \
+         -p "${INSTANCE_PORT}" \
+         "root@${INSTANCE_IP}" "true" >/dev/null 2>&1; then
+    print_ok "SSH-Login erfolgreich."
     return 0
   else
-    print_warn "SSH nicht erreichbar."
-    return 1
+    print_warn "SSH-Port erreichbar, aber Login/Auth noch nicht erfolgreich."
+    return 0
   fi
 }
 
