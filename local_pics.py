@@ -6,6 +6,9 @@ import time
 import random
 import cv2  # Für die Video-Erstellung
 import numpy as np
+import requests
+import json
+from openai import OpenAI
 
 # --- KONFIGURATION ---
 client = Client("http://127.0.0.1:7860")
@@ -19,24 +22,96 @@ CREATE_PREVIEW_VIDEO = True  # Option: Zeitraffer-Video erstellen
 num_images_to_generate = 20  # Anzahl für das Training (20-50 empfohlen)
 init_image_path = "test.jpg"
 
+# Qwen API Konfiguration
+MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY", "")
+if not MOONSHOT_API_KEY and os.path.exists(".moonshot_api"):
+    with open(".moonshot_api", "r") as f:
+        MOONSHOT_API_KEY = f.read().strip()
+
+# OpenAI-kompatiblen Client für Moonshot initialisieren
+moonshot_client = OpenAI(
+    api_key=MOONSHOT_API_KEY if MOONSHOT_API_KEY else "dummy",
+    base_url="https://api.moonshot.ai/v1"
+) if MOONSHOT_API_KEY else None
+
 # Grund-Prompt für Konsistenz (Wichtig für Training!)
 # Wir nutzen [trigger], falls du später ein spezielles Wort trainieren willst
 base_prompt = "Photorealistic portrait of a stunning woman, black pageboy haircut, striking blue eyes, [trigger]"
 
-variations = [
-    "cinematic lighting, high detail skin",
-    "natural sunlight, outdoor street photography",
-    "soft studio light, looking at camera",
-    "profile view, dramatic shadows, rim lighting",
-    "extreme close-up, highly detailed eyes",
-    "medium shot, elegant pose, fashion style",
-    "golden hour lighting, warm atmosphere",
-    "soft focus background, urban environment"
-]
-
 if not os.path.exists(init_image_path):
     print(f"Abbruch: {init_image_path} nicht gefunden!")
     exit()
+
+
+def generate_variations_with_llm(num_variations: int) -> list:
+    """Generiert kreative Prompt-Variationen mit der Moonshot (Kimi) API."""
+    if not moonshot_client:
+        print("⚠️  Keine MOONSHOT_API_KEY gefunden. Verwende Fallback-Variationen.")
+        return [
+            "cinematic lighting, high detail skin",
+            "natural sunlight, outdoor street photography",
+            "soft studio light, looking at camera",
+            "profile view, dramatic shadows, rim lighting",
+            "extreme close-up, highly detailed eyes",
+            "medium shot, elegant pose, fashion style",
+            "golden hour lighting, warm atmosphere",
+            "soft focus background, urban environment"
+        ]
+
+    prompt = f"""You are a prompt engineer for AI image generation. Create {num_variations} unique, diverse variations for a portrait photography prompt.
+    
+Base subject: Photorealistic portrait of a stunning woman, black pageboy haircut, striking blue eyes
+
+Generate {num_variations} different style/lighting/composition variations as comma-separated phrases (e.g., "cinematic lighting, dramatic shadows, rim lighting").
+Return ONLY a JSON array of strings, nothing else.
+
+Example format:
+["variation 1", "variation 2", "variation 3"]"""
+
+    try:
+        print("📡 Frage Moonshot (Kimi) API für Prompt-Variationen...")
+        completion = moonshot_client.chat.completions.create(
+            model="moonshot-v1-8k",
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant for AI image prompt generation."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8
+        )
+        
+        content = completion.choices[0].message.content
+        
+        # JSON aus dem Response extrahieren
+        start_idx = content.find("[")
+        end_idx = content.rfind("]") + 1
+        if start_idx >= 0 and end_idx > start_idx:
+            json_str = content[start_idx:end_idx]
+            variations = json.loads(json_str)
+            print(f"✅ {len(variations)} Variationen von Kimi erhalten")
+            return variations
+        else:
+            print("⚠️  Kein gültiges JSON in der Response")
+            return []
+            
+    except Exception as e:
+        print(f"⚠️  Moonshot API Fehler: {e}. Verwende Fallback.")
+        return []
+
+
+# Generiere Variationen mit LLM
+variations = generate_variations_with_llm(num_images_to_generate)
+# Fallback wenn LLM keine Variationen liefert
+if not variations:
+    variations = [
+        "cinematic lighting, high detail skin",
+        "natural sunlight, outdoor street photography",
+        "soft studio light, looking at camera",
+        "profile view, dramatic shadows, rim lighting",
+        "extreme close-up, highly detailed eyes",
+        "medium shot, elegant pose, fashion style",
+        "golden hour lighting, warm atmosphere",
+        "soft focus background, urban environment"
+    ]
 
 generated_files = []
 

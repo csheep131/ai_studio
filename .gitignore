@@ -6,6 +6,7 @@
 .hf_token
 .vastai_key
 .vastai_key_alt
+.moonshot_api
 *.pem
 *.p12
 *.pfx

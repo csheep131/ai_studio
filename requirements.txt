@@ -1,6 +1,8 @@
 # Host utilities
 PyYAML
 gradio-client
+requests
+openai
 
 # Image app / Diffusers runtime
 gradio>=4.0.0
