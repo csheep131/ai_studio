@@ -239,7 +239,21 @@ install_deps_common() {
     curl wget git \
     python3 python3-pip python3-venv \
     build-essential libssl-dev libffi-dev \
-    net-tools lsof procps ffmpeg zstd cmake ninja-build
+    net-tools lsof procps ffmpeg zstd cmake ninja-build \
+    apt-transport-https gnupg lsb-release
+
+  # Install Docker if not present (for extracting prebuilt llama-server)
+  if ! command -v docker &>/dev/null; then
+    log "Installing Docker..."
+    if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
+      curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/trusted.gpg.d/docker.gpg >/dev/null 2>&1 || true
+      echo "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+    fi
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq docker-ce docker-ce-cli containerd.io >/dev/null 2>&1 || {
+      log "⚠ Docker installation failed, continuing without Docker"
+    }
+  fi
 
   # Verify core tools required by this script are available.
   need_cmd curl
@@ -344,73 +358,84 @@ install_llama_cpp() {
 }
 
 _try_install_prebuilt_llama() {
-  # Try to download prebuilt llama-server binary from GitHub releases
+  # Try to obtain prebuilt llama-server binary
   # This avoids the ~5-10 minute CUDA build on every instance start
-  
-  local release_url="https://github.com/ggml-org/llama.cpp/releases"
+  #
+  # Strategy:
+  # 1. Extract from official llama.cpp Docker image (fastest, has CUDA)
+  # 2. Fall back to source build if Docker method fails
+
   local target_dir="${LLAMA_CPP_DIR}"
   local bin_target="${target_dir}/llama-server"
-  
+
   mkdir -p "${target_dir}"
-  
-  # Check if we already downloaded a prebuilt binary
+
+  # Check if we already have a prebuilt binary
   if [[ -x "${bin_target}" ]]; then
     LLAMA_SERVER_BIN="${bin_target}"
+    log "✓ Using existing prebuilt binary: ${LLAMA_SERVER_BIN}"
     return 0
   fi
+
+  # ── Option 1: Extract from official llama.cpp Docker image ───────────────
+  # The official image contains a CUDA-enabled build for Linux
+  # Image: ghcr.io/ggml-org/llama.cpp:server (or latest)
   
-  log "Attempting to download prebuilt llama-server binary..."
-  
-  # Try to get latest release info
-  local latest_release
-  latest_release=$(curl -sL -H "Accept: application/json" \
-    "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" 2>/dev/null || echo "")
-  
-  if [[ -z "${latest_release}" ]]; then
-    log "⚠ Could not fetch latest release info"
-    return 1
-  fi
-  
-  # Extract version tag
-  local version_tag
-  version_tag=$(echo "${latest_release}" | jq -r '.tag_name' 2>/dev/null || echo "")
-  
-  if [[ -z "${version_tag}" ]]; then
-    log "⚠ Could not parse version from release info"
-    return 1
-  fi
-  
-  log "Latest llama.cpp release: ${version_tag}"
-  
-  # For CUDA builds, we need to build from source anyway as official releases
-  # typically don't include CUDA binaries. However, we can try to use a 
-  # prebuilt CPU version for testing or fall back to source build.
-  
-  # Alternative: Check if there's a CUDA-enabled binary in releases
-  # (Note: Official releases usually don't have CUDA, but some forks might)
-  local cuda_asset
-  cuda_asset=$(echo "${latest_release}" | jq -r '.assets[] | select(.name | test("cuda|cu[0-9]+")) | .browser_download_url' 2>/dev/null | head -1 || echo "")
-  
-  if [[ -n "${cuda_asset}" ]]; then
-    log "Found CUDA-enabled prebuilt binary"
-    if curl -sL --retry 3 -o "${target_dir}/llama-cuda.tar.gz" "${cuda_asset}" 2>/dev/null; then
-      tar -xzf "${target_dir}/llama-cuda.tar.gz" -C "${target_dir}" 2>/dev/null || true
-      rm -f "${target_dir}/llama-cuda.tar.gz"
-      
-      # Find the extracted binary
-      local extracted_bin
-      extracted_bin=$(find "${target_dir}" -name "llama-server" -type f -executable 2>/dev/null | head -1 || echo "")
-      if [[ -n "${extracted_bin}" && -x "${extracted_bin}" ]]; then
-        LLAMA_SERVER_BIN="${extracted_bin}"
-        return 0
+  log "Attempting to extract llama-server from official Docker image..."
+
+  # Check if docker is available
+  if command -v docker &>/dev/null; then
+    local docker_image="ghcr.io/ggml-org/llama.cpp:server"
+    local container_name="llama_extract_$$"
+    
+    log "Using Docker image: ${docker_image}"
+    
+    # Pull the image
+    if docker pull "${docker_image}" >/dev/null 2>&1; then
+      # Create a temporary container to extract the binary
+      if docker create --name "${container_name}" "${docker_image}" >/dev/null 2>&1; then
+        # Find where llama-server is located in the image
+        # Common locations: /usr/bin/llama-server, /opt/llama.cpp/build/bin/llama-server
+        local image_bin_path=""
+        
+        # Try to find the binary location
+        image_bin_path=$(docker run --rm --entrypoint /bin/sh "${docker_image}" -c \
+          "find /usr /opt /app -name 'llama-server' -type f 2>/dev/null | head -1" 2>/dev/null || echo "")
+        
+        if [[ -n "${image_bin_path}" ]]; then
+          log "Found llama-server in image at: ${image_bin_path}"
+          
+          # Extract the binary
+          if docker cp "${container_name}:${image_bin_path}" "${bin_target}" 2>/dev/null; then
+            chmod +x "${bin_target}"
+            docker rm -f "${container_name}" >/dev/null 2>&1 || true
+            
+            # Also try to extract CUDA libraries if present
+            local cuda_lib_path
+            cuda_lib_path=$(docker run --rm --entrypoint /bin/sh "${docker_image}" -c \
+              "find /usr /opt /app -name 'libcu*.so*' -o -name 'libcublas*.so*' 2>/dev/null | head -5" 2>/dev/null || echo "")
+            
+            if [[ -n "${cuda_lib_path}" ]]; then
+              log "Extracting CUDA libraries..."
+              docker cp "${container_name}:${cuda_lib_path}" "${target_dir}/" 2>/dev/null || true
+            fi
+            
+            docker rm -f "${container_name}" >/dev/null 2>&1 || true
+            LLAMA_SERVER_BIN="${bin_target}"
+            log "✓ Successfully extracted llama-server from Docker image: ${LLAMA_SERVER_BIN}"
+            return 0
+          fi
+        fi
+        docker rm -f "${container_name}" >/dev/null 2>&1 || true
       fi
     fi
+    log "⚠ Docker extraction failed"
+  else
+    log "⚠ Docker not available on this system"
   fi
-  
-  # No suitable prebuilt binary found
-  # Clean up any partial downloads
-  rm -f "${target_dir}/llama-cuda.tar.gz" 2>/dev/null || true
-  
+
+  # No suitable prebuilt binary found - fall back to source build
+  log "⚠ No suitable prebuilt binary found, will build from source"
   return 1
 }
 
@@ -420,9 +445,10 @@ _build_llama_cpp_from_source() {
   # - Only build llama-server (not all tools)
   # - Release build with CUDA
   # - Clean up build artifacts after success
-  
+  # - Heartbeat during long build to prevent SSH timeout
+
   log "Cloning llama.cpp (shallow, minimal)..."
-  
+
   # Use minimal clone: depth=1, no tags, single branch
   if [[ ! -d "${LLAMA_CPP_DIR}/.git" ]]; then
     git clone --depth 1 --no-tags --single-branch \
@@ -433,21 +459,21 @@ _build_llama_cpp_from_source() {
   else
     log "llama.cpp source already present"
   fi
-  
+
   # Check if already built
   if [[ -x "${LLAMA_SERVER_BIN}" ]]; then
     log "llama.cpp already built at ${LLAMA_SERVER_BIN}"
     return 0
   fi
-  
+
   log "Building llama-server with CUDA (this may take 5-10 minutes)..."
-  
+
   # Install build dependencies if missing
   if ! command -v cmake &>/dev/null; then
     log "Installing cmake..."
     apt-get update -qq && apt-get install -y -qq cmake >/dev/null 2>&1 || true
   fi
-  
+
   # Configure with minimal options
   # Only build llama-server, skip tests and examples
   if [[ ! -f "${LLAMA_CPP_BUILD_DIR}/CMakeCache.txt" ]]; then
@@ -460,28 +486,39 @@ _build_llama_cpp_from_source() {
       -DGGML_BUILD_EXAMPLES=OFF \
       -DGGML_BUILD_SERVER=ON \
       -DCMAKE_INSTALL_PREFIX="${LLAMA_CPP_BUILD_DIR}" \
-      >/dev/null 2>&1 || {
+      2>&1 | tee -a "${LOG_DIR}/llama_build.log" || {
       log "✗ CMake configuration failed"
       return 1
     }
   fi
+
+  # Build only llama-server target with progress output
+  # Use tee to capture output and keep connection alive
+  log "Starting compilation (watch ${LOG_DIR}/llama_build.log for details)..."
   
-  # Build only llama-server target
+  local build_start
+  build_start=$(date +%s)
+  
   cmake --build "${LLAMA_CPP_BUILD_DIR}" \
     --config Release \
     --target llama-server \
     -j"$(nproc)" \
-    >/dev/null 2>&1 || {
+    2>&1 | tee -a "${LOG_DIR}/llama_build.log" || {
     log "✗ Build failed"
     return 1
   }
-  
+
+  local build_end
+  build_end=$(date +%s)
+  local build_duration=$((build_end - build_start))
+  log "Build completed in ${build_duration}s"
+
   # Verify build success
   if [[ ! -x "${LLAMA_SERVER_BIN}" ]]; then
     log "✗ llama-server binary not found after build"
     return 1
   fi
-  
+
   # Optional: Clean build directory to save space
   # Keep only the binary, remove object files
   if [[ -d "${LLAMA_CPP_BUILD_DIR}/CMakeFiles" ]]; then
@@ -490,7 +527,7 @@ _build_llama_cpp_from_source() {
     rm -rf "${LLAMA_CPP_BUILD_DIR}/CMakeFiles" 2>/dev/null || true
     rm -f "${LLAMA_CPP_BUILD_DIR}/CMakeCache.txt" 2>/dev/null || true
   fi
-  
+
   log "✓ llama-server built successfully"
   return 0
 }

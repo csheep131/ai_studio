@@ -32,7 +32,7 @@ from huggingface_hub import HfApi, hf_hub_download, snapshot_download, login
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-DEFAULT_MAX_SIZE_GB = 40.0
+DEFAULT_MAX_SIZE_GB = 100.0
 SAFE_MODE_MAX_SIZE_GB = 1.0  # Only metadata in safe mode
 DRY_RUN = False
 SAFE_MODE = False
@@ -41,7 +41,7 @@ VERBOSE = False
 # Model-specific configurations
 MODEL_CONFIGS = {
     "black-forest-labs/FLUX.2-dev": {
-        "max_size_gb": 50.0,
+        "max_size_gb": 120.0,
         "required_components": ["model_index", "scheduler", "text_encoder", "tokenizer", "transformer"],
         "optional_components": [],
         "excluded_components": ["vae", "image_encoder", "feature_extractor"],
@@ -63,15 +63,15 @@ MODEL_CONFIGS = {
         "description": "SDXL Base",
     },
     "Wan-AI/Wan2.1-T2V-14B-Diffusers": {
-        "max_size_gb": 45.0,
-        "required_components": ["model_index", "scheduler", "tokenizer", "text_encoder", 
+        "max_size_gb": 100.0,
+        "required_components": ["model_index", "scheduler", "tokenizer", "text_encoder",
                                 "text_encoder_2", "transformer", "vae"],
         "optional_components": ["feature_extractor", "image_encoder"],
         "excluded_components": [],
         "description": "Wan2.1 Text-to-Video",
     },
     "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers": {
-        "max_size_gb": 45.0,
+        "max_size_gb": 100.0,
         "required_components": ["model_index", "scheduler", "tokenizer", "text_encoder",
                                 "transformer", "vae", "image_encoder"],
         "optional_components": ["feature_extractor"],
