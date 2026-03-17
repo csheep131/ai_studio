@@ -472,6 +472,19 @@ ensure_stack_setup() {
     print_err "Upload fehlgeschlagen."
     return 1
   fi
+  # Upload hf_safe_download.py for safe HuggingFace downloads
+  local hf_safe_download="${SCRIPT_DIR}/hf_safe_download.py"
+  if [[ -f "${hf_safe_download}" ]]; then
+    print_info "Lade hf_safe_download.py hoch..."
+    if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
+      "${hf_safe_download}" root@"${INSTANCE_IP}":~/hf_safe_download.py; then
+      print_err "Upload von hf_safe_download.py fehlgeschlagen."
+      return 1
+    fi
+  else
+    print_err "hf_safe_download.py nicht gefunden: ${hf_safe_download}"
+    return 1
+  fi
   if [[ "$stack" == "image" && -f "${IMAGE_APP_SOURCE}" ]]; then
     print_info "Lade ${IMAGE_APP_SOURCE##*/} hoch..."
     if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
