@@ -194,17 +194,29 @@ get_gpu_name() {
   nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -1 || echo ""
 }
 
+# Get GPU VRAM in MB
+get_gpu_vram_mb() {
+  nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "0"
+}
+
+# Get system RAM in GB
+get_system_ram_gb() {
+  local mem_kb
+  mem_kb=$(awk '/^MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo "0")
+  echo $(( (mem_kb + 1024 - 1) / 1048576 ))
+}
+
 # Check if GPU is H100 or better (H100, H200, B200, etc.)
 is_h100_or_better() {
   local gpu_name
   gpu_name=$(get_gpu_name)
-  
+
   # Check for H100, H200, B200, or any GPU with higher compute capability
   if [[ "$gpu_name" =~ H100|H200|B200|B100|GH200 ]]; then
     log "Detected high-end GPU: ${gpu_name}"
     return 0
   fi
-  
+
   # Also check via compute capability (H100 = sm_90)
   local compute_cap
   compute_cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr '.' '')
@@ -212,12 +224,39 @@ is_h100_or_better() {
     log "Detected GPU with compute capability ${compute_cap} (H100+ class)"
     return 0
   fi
-  
+
   log "GPU ${gpu_name} is not H100 or better"
   return 1
 }
 
-# Require H100+ GPU for text_pro stack
+# Check if GPU is A100/A800 with 80GB VRAM (suitable for 122B MoE with layer offloading)
+is_a100_80gb() {
+  local gpu_name gpu_vram_mb
+  gpu_name=$(get_gpu_name)
+  gpu_vram_mb=$(get_gpu_vram_mb)
+
+  # Check for A100 or A800 with 80GB VRAM (79000+ MB)
+  if [[ "$gpu_name" =~ A100|A800 ]] && [[ "$gpu_vram_mb" -ge 79000 ]]; then
+    log "Detected A100/A800 80GB: ${gpu_name} (${gpu_vram_mb} MB VRAM)"
+    return 0
+  fi
+
+  log "GPU ${gpu_name} (${gpu_vram_mb} MB) is not A100/A800 80GB"
+  return 1
+}
+
+# Check if GPU is suitable for 122B MoE models (H100+ or A100-80GB)
+is_high_end_gpu() {
+  if is_h100_or_better; then
+    return 0
+  fi
+  if is_a100_80gb; then
+    return 0
+  fi
+  return 1
+}
+
+# Require H100+ GPU for text_pro stack (legacy, kept for compatibility)
 require_h100_gpu() {
   if ! is_h100_or_better; then
     echo "✗ text_pro stack requires H100 or better GPU" >&2
@@ -225,6 +264,34 @@ require_h100_gpu() {
     echo "✗ Please rent a different instance or use the regular 'text' stack" >&2
     return 1
   fi
+  return 0
+}
+
+# Require high-end GPU (H100+ or A100-80GB) for 122B MoE models
+require_high_end_gpu() {
+  local gpu_name gpu_vram_mb system_ram_gb
+  gpu_name=$(get_gpu_name)
+  gpu_vram_mb=$(get_gpu_vram_mb)
+  system_ram_gb=$(get_system_ram_gb)
+
+  if ! is_high_end_gpu; then
+    echo "✗ text_pro stack requires H100/H200/B200 or A100/A800 80GB GPU" >&2
+    echo "✗ Current GPU: ${gpu_name} (${gpu_vram_mb} MB VRAM)" >&2
+    echo "✗ For 122B MoE models (Qwen3.5-122B), you need:" >&2
+    echo "✗   - H100/H200/B200 (80GB+ VRAM), or" >&2
+    echo "✗   - A100/A800 80GB with layer offloading" >&2
+    echo "✗ Please rent a different instance or use the regular 'text' stack" >&2
+    return 1
+  fi
+
+  # Check system RAM (need 90-110 GB for 8k-32k context with 122B model)
+  if [[ "$system_ram_gb" -lt 90 ]]; then
+    echo "⚠ Warning: System RAM is only ${system_ram_gb} GB (recommended: 96+ GB)" >&2
+    echo "⚠ For 122B MoE models with larger context, 96+ GB system RAM is recommended" >&2
+    # Don't fail, just warn
+  fi
+
+  log "✓ High-end GPU check passed: ${gpu_name} (${gpu_vram_mb} MB VRAM, ${system_ram_gb} GB system RAM)"
   return 0
 }
 
@@ -1867,12 +1934,16 @@ pull_hf_model_safe() {
   
   # Model-specific limits
   case "${model_id}" in
-    black-forest-labs/FLUX.2-dev|black-forest-labs/FLUX.1-dev)
+    black-forest-labs/FLUX.2-dev)
+      max_size_gb=120
+      log "[hf] FLUX.2-dev model: max ${max_size_gb}GB (NO vae, NO image_encoder)"
+      ;;
+    black-forest-labs/FLUX.1-dev)
       max_size_gb=50
-      log "[hf] FLUX model: max ${max_size_gb}GB (NO vae, NO image_encoder)"
+      log "[hf] FLUX.1-dev model: max ${max_size_gb}GB (NO vae, NO image_encoder)"
       ;;
     Wan-AI/Wan2.1-T2V-14B-Diffusers|Wan-AI/Wan2.1-I2V-14B-720P-Diffusers)
-      max_size_gb=45
+      max_size_gb=100
       log "[hf] Wan2.1 model: max ${max_size_gb}GB"
       ;;
     stabilityai/stable-diffusion-xl-base-1.0)
@@ -3146,8 +3217,8 @@ case "${STACK_TYPE}" in
     write_manifest "text" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
     ;;
   text_pro)
-    # Requires H100 or better GPU
-    require_h100_gpu || exit 1
+    # Requires H100/H200/B200 or A100/A800 80GB (for 122B MoE models)
+    require_high_end_gpu || exit 1
     STACK_MODEL="${STACK_MODEL:-$TEXT_PRO_DEFAULT_MODEL}"
     STACK_TEMPLATE="${STACK_TEMPLATE:-nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04}"
     SERVICE_PORT="${SERVICE_PORT:-8081}"
