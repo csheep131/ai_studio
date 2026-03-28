@@ -338,7 +338,7 @@ wait_for_ssh() {
 remote_log_file_for_stack() {
   local stack="$1"
   case "$stack" in
-    text|text_pro)
+    text|text_pro|qwen_coder_ablit)
       echo "/var/log/stack/${stack}.log"
       ;;
     image)

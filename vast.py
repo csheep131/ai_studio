@@ -560,6 +560,7 @@ def search_offers_cli(
     min_vram_mb: int,
     max_dph: float,
     limit: int = 50,
+    min_system_ram_gb: int = 0,
 ) -> list[dict]:
     """
     Search offers via vastai CLI - returns valid ask IDs for create.
@@ -567,13 +568,14 @@ def search_offers_cli(
     gpu_ram ist in GB!
     """
     import re as _re
-    
+
     # gpu_ram in GB umrechnen (API gibt GB zurück)
     min_vram_gb = min_vram_mb / 1024.0
-    
+
     # Query für CLI: gpu_name regex, min_vram, max_dph, rentable
+    # Hinweis: sys_ram wird von der API nicht unterstützt, muss client-side gefiltert werden
     query = f'rentable=True dph_total<{max_dph} gpu_ram>={min_vram_gb:.1f} num_gpus=1'
-    
+
     # CLI command
     cmd = [
         "vastai", "search", "offers",
@@ -582,29 +584,44 @@ def search_offers_cli(
         "--raw",
         "-o", "dph_total",  # Sort by price ascending
     ]
-    
+
     info(f"Search query: {query}")
     cp = run(cmd, check=False, capture=True)
     raw = cp.stdout.strip()
-    
+
     if cp.returncode != 0:
         raise VastError(f"Search failed: {cp.stderr}")
-    
+
     try:
         data = json.loads(raw)
         offers = data if isinstance(data, list) else data.get("offers", [])
-        
+
         # Filter by GPU regex (client-side)
         pattern = _re.compile(gpu_regex, _re.IGNORECASE)
         filtered = [o for o in offers if pattern.search(o.get("gpu_name", ""))]
-        
+
+        # Filter by system RAM (client-side) - nur wenn RAM-Daten verfügbar
+        if min_system_ram_gb > 0:
+            before_count = len(filtered)
+            # Vast.ai liefert oft None für sys_ram - nur filtern wenn Daten da sind
+            filtered_with_ram = []
+            for o in filtered:
+                sys_ram_mb = o.get("sys_ram")
+                if sys_ram_mb is not None and sys_ram_mb >= (min_system_ram_gb * 1024):
+                    filtered_with_ram.append(o)
+            if filtered_with_ram:
+                filtered = filtered_with_ram
+                info(f"RAM filter: {before_count} -> {len(filtered)} offers (min {min_system_ram_gb}GB)")
+            else:
+                info(f"RAM filter: No offers with RAM data available. Skipping RAM filter.")
+
         # Sort by dph
         filtered.sort(key=lambda x: float(x.get("dph_total") or x.get("dph") or 999))
-        
+
         # Debug: erste 3 Angebote loggen
         if filtered:
             info(f"Found {len(filtered)} offers. Top offer: id={filtered[0].get('ask_contract_id')}, gpu={filtered[0].get('gpu_name')}, dph={filtered[0].get('dph_total')}")
-        
+
         return filtered
     except json.JSONDecodeError as e:
         raise VastError(f"Search output not JSON: {raw[:200]}") from e
@@ -1250,7 +1267,7 @@ def stack_health(stack: str) -> Dict[str, Any]:
             result["missing"].append("model mismatch")
             result["suggested_actions"].append("rerun setup to apply current model")
 
-    if stack in {"text", "text_pro"}:
+    if stack in {"text", "text_pro", "qwen_coder_ablit"}:
         desired_hint = str(config.get("model_file_hint", "") or "")
         current_files: List[str] = []
         onstart_model_path = ""
@@ -2021,10 +2038,11 @@ def cmd_rent(args) -> int:
     max_dph = config.get("max_dph", 99)
     min_vram_mb = config.get("min_vram_mb", 0)
     gpu_regex = config.get("gpu_regex", ".")
+    min_system_ram_gb = config.get("min_system_ram_gb", 0)
     min_vram_gb = min_vram_mb / 1024.0
     disk = args.disk or config.get("disk_gb", 100)
 
-    info(f"Suche Angebot für {stack} (max ${max_dph}/h, min {min_vram_mb}MB VRAM, GPU: {gpu_regex})...")
+    info(f"Suche Angebot für {stack} (max ${max_dph}/h, min {min_vram_mb}MB VRAM, min {min_system_ram_gb}GB RAM, GPU: {gpu_regex})...")
 
     # CLI search verwenden - liefert valide ask IDs für create
     offers = search_offers_cli(
@@ -2032,6 +2050,7 @@ def cmd_rent(args) -> int:
         min_vram_mb=min_vram_mb,
         max_dph=max_dph,
         limit=50,
+        min_system_ram_gb=min_system_ram_gb,
     )
 
     if not offers:

@@ -70,7 +70,56 @@ COMFYUI_DIR="/opt/comfyui"
 COMFYUI_VENV="${COMFYUI_DIR}/venv"
 COMFYUI_MODEL_DIR="${MODEL_DIR_BASE}/comfyui/model"
 
+# Suppress pip warnings when running as root (common on vast.ai instances)
+export PIP_ROOT_USER_ACTION=ignore
+
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+ensure_llama_server_link() {
+    local target="$1"
+    local link_path="/usr/local/bin/llama-server"
+
+    # Resolve target to its real path (follow all symlinks) to avoid symlink chains
+    local real_target
+    if [[ -L "${target}" ]]; then
+        real_target="$(readlink -f "${target}" 2>/dev/null || echo "${target}")"
+    else
+        real_target="${target}"
+    fi
+
+    # If real target doesn't exist, don't create link
+    if [[ ! -f "${real_target}" ]]; then
+        log "WARNING: Cannot create link, target does not exist: ${real_target}"
+        return 1
+    fi
+
+    # Remove any existing link or file at the link path
+    if [[ -L "${link_path}" ]] || [[ -e "${link_path}" ]]; then
+        log "Removing existing link/file at ${link_path}"
+        rm -f "${link_path}" 2>/dev/null || true
+    fi
+
+    # Create parent directory if it doesn't exist
+    mkdir -p "$(dirname "${link_path}")"
+
+    # Create new link pointing directly to the real target (no symlink chains)
+    ln -sf "${real_target}" "${link_path}" 2>/dev/null || {
+        log "Failed to create symlink at ${link_path}"
+        return 1
+    }
+
+    # Verify the link was created correctly
+    if [[ -L "${link_path}" ]]; then
+        local link_target
+        link_target="$(readlink "${link_path}" 2>/dev/null || true)"
+        log "Created link: ${link_path} -> ${link_target}"
+        return 0
+    else
+        log "WARNING: Failed to create symlink at ${link_path}"
+        return 1
+    fi
+}
+
 mkdir -p "${LOG_DIR}"
 LOCK_DIR="/tmp/setup_remote_v3.lock"
 LOCK_PID_FILE="${LOCK_DIR}/pid"
@@ -328,6 +377,34 @@ install_deps_common() {
   need_cmd ffmpeg
   need_cmd zstd
   need_cmd cmake
+  
+  # Upgrade pip to avoid issues with --root-user-action flag on older versions
+  # Use robust approach: first ensure pip is installed, then upgrade with fallback
+  log "Ensuring pip is up-to-date..."
+  # Temporarily unset PIP_ROOT_USER_ACTION to avoid issues with older pip versions
+  unset PIP_ROOT_USER_ACTION 2>/dev/null || true
+  # First, ensure pip is installed via ensurepip module (works even without pip)
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    log "pip not found, installing via ensurepip..."
+    python3 -m ensurepip --upgrade --default-pip 2>/dev/null || {
+      log "WARNING: ensurepip failed, trying alternative installation..."
+      curl -sSL https://bootstrap.pypa.io/get-pip.py | python3 2>/dev/null || true
+    }
+  fi
+  # Now upgrade pip with fallback strategy
+  if ! python3 -m pip install --upgrade pip --quiet >/dev/null 2>&1; then
+    log "pip upgrade with --quiet failed, trying without quiet flag..."
+    if ! python3 -m pip install --upgrade pip >/dev/null 2>&1; then
+      log "WARNING: pip upgrade failed, continuing with existing pip version"
+    else
+      log "pip upgraded successfully (without quiet flag)"
+    fi
+  else
+    log "pip upgraded successfully (with quiet flag)"
+  fi
+  # Re-enable PIP_ROOT_USER_ACTION for subsequent pip operations
+  export PIP_ROOT_USER_ACTION=ignore
+  
   log "Base dependencies installed."
 }
 
@@ -392,14 +469,14 @@ install_llama_cpp() {
   if [[ -n "${existing_bin}" && -x "${existing_bin}" && "${FORCE_SOURCE}" != "1" ]]; then
     LLAMA_SERVER_BIN="${existing_bin}"
     log "✓ Using system llama-server: ${LLAMA_SERVER_BIN}"
-    ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server 2>/dev/null || true
+    ensure_llama_server_link "${LLAMA_SERVER_BIN}"
     return 0
   fi
   
   # Priority 2: Check for existing build in standard location
   if [[ -x "${LLAMA_SERVER_BIN}" && "${FORCE_SOURCE}" != "1" ]]; then
     log "✓ Using existing llama.cpp build: ${LLAMA_SERVER_BIN}"
-    ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server
+    ensure_llama_server_link "${LLAMA_SERVER_BIN}"
     return 0
   fi
   
@@ -407,6 +484,7 @@ install_llama_cpp() {
   if [[ "${USE_PREBUILT}" == "1" && "${FORCE_SOURCE}" != "1" ]]; then
     if _try_install_prebuilt_llama; then
       log "✓ Using prebuilt llama-server binary"
+      ensure_llama_server_link "${LLAMA_SERVER_BIN}"
       return 0
     fi
     log "⚠ Prebuilt binary not available, falling back to source build..."
@@ -419,7 +497,7 @@ install_llama_cpp() {
     return 1
   }
   
-  ln -sf "${LLAMA_SERVER_BIN}" /usr/local/bin/llama-server
+  ensure_llama_server_link "${LLAMA_SERVER_BIN}"
   log "✓ llama.cpp ready: ${LLAMA_SERVER_BIN}"
   return 0
 }
@@ -604,7 +682,7 @@ install_hf_hub() {
     log "huggingface_hub already installed."
     return 0
   fi
-  python3 -m pip install -q --root-user-action=ignore huggingface_hub
+  PIP_ROOT_USER_ACTION=ignore python3 -m pip install -q huggingface_hub
 }
 
 resolve_gguf_model_path() {
@@ -795,7 +873,11 @@ start_llama_server() {
   local label="$2"
   local port="$3"
   local model_path="$4"
-  local ctx_size="${5:-8192}"
+  # ctx_size aus stacks.yaml lesen wenn nicht angegeben
+  local ctx_size="${5:-}"
+  if [[ -z "$ctx_size" ]]; then
+    ctx_size=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack_key}', {}).get('ctx_size', 8192))" 2>/dev/null || echo "8192")
+  fi
   model_path="$(ensure_merged_model_path "${model_path}")"
 
   if pgrep -af "llama-server.*--port ${port}" >/dev/null 2>&1 || \
@@ -806,7 +888,7 @@ start_llama_server() {
     return 0
   fi
 
-  log "Starting ${label} on ${BIND_ADDR}:${port}..."
+  log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size})..."
   nohup stdbuf -oL -eL "${LLAMA_SERVER_BIN}" \
     -m "${model_path}" \
     --host "${BIND_ADDR}" \
@@ -975,40 +1057,20 @@ start_ollama() {
   wait_for_port "${BIND_ADDR}" "${OLLAMA_PORT}" 30 2
 }
 
-# ── TEXT PRO (H100+ only, separate Ollama instance) ──────────────────────
-
-install_ollama_pro() {
-  # Uses same Ollama installation, just different port
-  command -v ollama &>/dev/null || install_ollama
-  log "Ollama available for text_pro stack."
-}
-
-start_ollama_pro() {
-  # Check if already running on text_pro port
-  if pgrep -f "ollama.*${TEXT_PRO_PORT}" &>/dev/null || \
-     curl -sf "http://${BIND_ADDR}:${TEXT_PRO_PORT}/api/tags" &>/dev/null 2>&1; then
-    log "Ollama Pro already running on ${TEXT_PRO_PORT}."
-    return 0
-  fi
-  
-  log "Starting Ollama Pro on ${BIND_ADDR}:${TEXT_PRO_PORT}..."
-  OLLAMA_HOST="${BIND_ADDR}:${TEXT_PRO_PORT}" nohup ollama serve >"${LOG_DIR}/ollama_pro.log" 2>&1 &
-  disown
-  wait_for_port "${BIND_ADDR}" "${TEXT_PRO_PORT}" 30 2
-}
-
-pull_ollama_pro_model() {
-  [[ "${PULL_MODEL}" == "1" ]] || return
-  ensure_ollama_model_pullable "${1}" "Ollama Pro model" || return 1
-  log "Pulling Ollama Pro model: ${1} (this is a large model, may take a while)..."
-  OLLAMA_HOST="${BIND_ADDR}:${TEXT_PRO_PORT}" ollama pull "${1}"
-  log "Model pull done: ${1}"
-}
+# ── TEXT PRO (H100+ only, llama.cpp only - NO OLLAMA) ────────────────────
 
 write_onstart_text_pro() {
   local model_path="$1"
   local ctx_size="${2:-16384}"
   write_onstart_llama_server "text_pro" "TEXT_PRO llama.cpp" "${TEXT_PRO_PORT}" "${model_path}" "${ctx_size}"
+}
+
+write_onstart_qwen_coder_ablit() {
+  local model_path="$1"
+  # ctx_size aus stacks.yaml lesen, Fallback auf 32768
+  local ctx_size
+  ctx_size=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('qwen_coder_ablit', {}).get('ctx_size', 32768))" 2>/dev/null || echo "32768")
+  write_onstart_llama_server "qwen_coder_ablit" "QWEN_CODER_ABLIT llama.cpp" "${SERVICE_PORT}" "${model_path}" "${ctx_size}"
 }
 
 install_open_webui() {
@@ -3225,10 +3287,22 @@ case "${STACK_TYPE}" in
     install_llama_cpp
     install_hf_hub
     text_pro_model_path="$(resolve_gguf_model_path "${STACK_MODEL}" "${STACK_MODEL_FILE_HINT}" "text_pro")"
-    write_onstart_text_pro "${text_pro_model_path}" 16384
-    start_llama_server "text_pro" "TEXT_PRO llama.cpp" "${TEXT_PRO_PORT}" "${text_pro_model_path}" 16384
+    write_onstart_text_pro "${text_pro_model_path}" 262144
+    start_llama_server "text_pro" "TEXT_PRO llama.cpp" "${TEXT_PRO_PORT}" "${text_pro_model_path}" 262144
     write_manifest "text_pro" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
-    log "TEXT_PRO llama.cpp stack ready on port ${TEXT_PRO_PORT}"
+    log "TEXT_PRO llama.cpp stack ready on port ${TEXT_PRO_PORT} with 262,144 token context"
+    ;;
+  qwen_coder_ablit)
+    STACK_MODEL="${STACK_MODEL:-Qwen/Qwen3-Coder-Next-abliterated}"
+    STACK_TEMPLATE="${STACK_TEMPLATE:-nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04}"
+    SERVICE_PORT="${SERVICE_PORT:-8082}"
+    install_llama_cpp
+    install_hf_hub
+    qwen_coder_model_path="$(resolve_gguf_model_path "${STACK_MODEL}" "${STACK_MODEL_FILE_HINT}" "qwen_coder_ablit")"
+    write_onstart_qwen_coder_ablit "${qwen_coder_model_path}"
+    start_llama_server "qwen_coder_ablit" "QWEN_CODER_ABLIT llama.cpp" "${SERVICE_PORT}" "${qwen_coder_model_path}"
+    write_manifest "qwen_coder_ablit" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
+    log "QWEN_CODER_ABLIT llama.cpp stack ready on port ${SERVICE_PORT} with configured context size"
     ;;
   image)
     STACK_MODEL="${STACK_MODEL:-$IMAGE_DEFAULT_MODEL}"

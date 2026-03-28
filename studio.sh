@@ -303,8 +303,8 @@ if not isinstance(data, list) or len(data) == 0:
     sys.exit(1)
 
 # State-Dateien einlesen für Stack-Zuordnung
-stacks = ['text', 'text_pro', 'image', 'video', 'video_lora']
-stack_labels = {'text': 'Text', 'text_pro': 'Text Pro', 'image': 'Bild', 'video': 'Video', 'video_lora': 'Video LoRA'}
+stacks = ['text', 'text_pro', 'image', 'video', 'video_lora', 'qwen_coder_ablit']
+stack_labels = {'text': 'Text', 'text_pro': 'Text Pro', 'image': 'Bild', 'video': 'Video', 'video_lora': 'Video LoRA', 'qwen_coder_ablit': 'Qwen Coder'}
 
 stack_assignments = {}
 for stack in stacks:
@@ -497,7 +497,7 @@ get_stack_config() {
 
 supports_model_update() {
   case "$1" in
-    text|text_pro) return 0 ;;
+    text|text_pro|qwen_coder_ablit) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -545,6 +545,7 @@ get_stack_label() {
       image_prompt) echo "FLUX.2 Text-to-Image" ;;
       video)       echo "Wan2.1 Video Studio" ;;
       video_lora)  echo "Wan2.1 Video LoRA Studio" ;;
+      qwen_coder_ablit) echo "Qwen3-Coder-Next-abliterated (GLX5090)" ;;
       *)           echo "$stack" ;;
     esac
   else
@@ -1723,21 +1724,109 @@ open_tunnel_safely() {
   source "$sf" >/dev/null 2>&1 || true
   [[ -z "${INSTANCE_IP:-}" || -z "${INSTANCE_PORT:-}" ]] && { print_err "Fehlende Instanzdaten."; return 1; }
 
-  # SSH-Tunnel direkt mit exec ssh (kein bash -c String-Building)
+  # SSH-Tunnel im Hintergrund starten (mit -f Option)
   if [[ -n "$api_remote_port" && -n "$api_tunnel_port" ]]; then
-    exec ssh -N \
+    ssh -f -N \
       -L "${local_port}:127.0.0.1:${service_port}" \
       -L "${api_tunnel_port}:127.0.0.1:${api_remote_port}" \
       -p "${INSTANCE_PORT}" "root@${INSTANCE_IP}"
   else
-    exec ssh -N \
+    ssh -f -N \
       -L "${local_port}:127.0.0.1:${service_port}" \
       -p "${INSTANCE_PORT}" "root@${INSTANCE_IP}"
   fi
+  
+  # Kurze Wartezeit damit Tunnel aufgebaut wird
+  sleep 2
+  
+  # Prüfen ob Tunnel erfolgreich
+  if command -v nc >/dev/null 2>&1; then
+    if nc -z -w 2 127.0.0.1 "${local_port}" >/dev/null 2>&1; then
+      print_ok "Tunnel erstellt: http://127.0.0.1:${local_port}"
+      [[ -n "$api_tunnel_port" ]] && print_ok "API-Tunnel: http://127.0.0.1:${api_tunnel_port}"
+      return 0
+    fi
+  else
+    # Fallback: Python Port-Check
+    if python3 -c "import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1', ${local_port})); s.close()" 2>/dev/null; then
+      print_ok "Tunnel erstellt: http://127.0.0.1:${local_port}"
+      [[ -n "$api_tunnel_port" ]] && print_ok "API-Tunnel: http://127.0.0.1:${api_tunnel_port}"
+      return 0
+    fi
+  fi
+  
+  print_warn "Tunnel wurde gestartet, aber Port ist nicht erreichbar (noch im Aufbau?)"
+  return 0
 }
 
 open_tunnel_for_stack() {
-  ensure_stack_repaired_or_ready "$1" && open_tunnel_safely "$1" || print_err "Stack nicht bereit."
+  local stack="$1"
+  
+  # Nur prüfen ob State existiert (keine teuren API/SSH Prüfungen)
+  if ! has_state "$stack"; then
+    print_err "Keine State-Datei für $(get_stack_label $stack). Bitte zuerst Instanz mieten."
+    return 1
+  fi
+  
+  # Instanzdaten laden
+  local sf="$(state_file_for "$stack")"
+  source "$sf" >/dev/null 2>&1 || true
+  
+  if [[ -z "${INSTANCE_IP:-}" || -z "${INSTANCE_PORT:-}" ]]; then
+    print_err "Fehlende Instanzdaten für $(get_stack_label $stack)."
+    return 1
+  fi
+  
+  # Tunnel öffnen (open_tunnel_safely macht eigene minimale Prüfung)
+  open_tunnel_safely "$stack"
+}
+
+close_tunnel_for_stack() {
+  local stack="$1"
+  local local_port service_port api_tunnel_port
+  
+  # Hole Ports aus stacks.yaml
+  local_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack}', {}).get('local_port', c.get('stacks', {}).get('${stack}', {}).get('service_port', '')))")
+  api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')")
+  
+  print_step "Schließe SSH-Tunnel für $(get_stack_label $stack)..."
+  
+  # SSH-Prozesse finden und beenden die auf diesen Ports lauschen
+  local killed=0
+  
+  if [[ -n "$local_port" ]]; then
+    # Prozesse finden die auf dem lokalen Port lauschen
+    local pids
+    pids=$(lsof -ti :${local_port} 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      for pid in $pids; do
+        # Prüfen ob es ein SSH-Tunnel Prozess ist
+        if ps -p "$pid" -o comm= 2>/dev/null | grep -q "ssh"; then
+          kill "$pid" 2>/dev/null && killed=$((killed + 1))
+        fi
+      done
+    fi
+  fi
+  
+  if [[ -n "$api_tunnel_port" ]]; then
+    local pids
+    pids=$(lsof -ti :${api_tunnel_port} 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      for pid in $pids; do
+        if ps -p "$pid" -o comm= 2>/dev/null | grep -q "ssh"; then
+          kill "$pid" 2>/dev/null && killed=$((killed + 1))
+        fi
+      done
+    fi
+  fi
+  
+  if [[ $killed -gt 0 ]]; then
+    print_ok "$killed SSH-Tunnel Prozess(e) beendet."
+  else
+    print_warn "Keine aktiven SSH-Tunnel gefunden."
+  fi
+  
+  return 0
 }
 
 stack_local_url() {
@@ -2444,6 +2533,7 @@ menu_stack_actions() {
     image_prompt) stack_name="FLUX.2 T2I" ;;
     video)       stack_name="Video" ;;
     video_lora)  stack_name="Video LoRA" ;;
+    qwen_coder_ablit) stack_name="Qwen Coder (GLX5090)" ;;
   esac
 
   while true; do
@@ -2455,12 +2545,12 @@ menu_stack_actions() {
     render_stack_status_compact "$stack" false
     box_sep
     box_menu_item " ${YELLOW}[1]${NC} Automatisch vorbereiten    ${YELLOW}[2]${NC} Status aktualisieren"
-    box_menu_item " ${YELLOW}[3]${NC} Tunnel/UI öffnen           ${YELLOW}[4]${NC} Lokale State löschen"
+    box_menu_item " ${YELLOW}[3]${NC} Tunnel/UI öffnen           ${YELLOW}[4]${NC} Tunnel schließen"
+    box_menu_item " ${YELLOW}[5]${NC} Lokale State löschen       ${YELLOW}[6]${NC} Remote zerstören"
     if supports_model_update "$stack"; then
-      box_menu_item " ${YELLOW}[5]${NC} Remote zerstören           ${YELLOW}[6]${NC} Modell aktualisieren"
-      box_menu_item " ${YELLOW}[b]${NC} Zurück"
+      box_menu_item " ${YELLOW}[7]${NC} Modell aktualisieren       ${YELLOW}[b]${NC} Zurück"
     else
-      box_menu_item " ${YELLOW}[5]${NC} Remote zerstören           ${YELLOW}[b]${NC} Zurück"
+      box_menu_item " ${YELLOW}[b]${NC} Zurück"
     fi
     box_menu_end
     echo -ne "${CYAN}Auswahl:${NC} "
@@ -2477,9 +2567,10 @@ menu_stack_actions() {
         pause
         ;;
       3) open_tunnel_for_stack "$stack" || true; pause ;;
-      4) run_manage delete "$stack" || true; pause ;;
-      5) run_manage delete "$stack" --remote || true; pause ;;
-      6)
+      4) close_tunnel_for_stack "$stack" || true; pause ;;
+      5) run_manage delete "$stack" || true; pause ;;
+      6) run_manage delete "$stack" --remote || true; pause ;;
+      7)
         if supports_model_update "$stack"; then
           update_stack_model_flow "$stack" || true
           pause
@@ -2523,7 +2614,7 @@ interactive_menu() {
   while true; do
     render_status_overview
     box_menu_start "HAUPTMENÜ"
-    box_menu_item " ${YELLOW}[1]${NC} Text-UI            ${YELLOW}[2]${NC} Text Pro UI (H100+)  ${YELLOW}[3]${NC} Bild-UI"
+    box_menu_item " ${YELLOW}[1]${NC} Qwen Coder (GLX5090) ${YELLOW}[2]${NC} Text Pro UI (H100+)  ${YELLOW}[3]${NC} Bild-UI"
     box_menu_item " ${YELLOW}[4]${NC} FLUX.2 T2I         ${YELLOW}[5]${NC} Video-UI             ${YELLOW}[6]${NC} Video LoRA UI"
     box_menu_item " ${YELLOW}[7]${NC} Video-Workflow     ${YELLOW}[8]${NC} Vast-Instanzen       ${YELLOW}[c]${NC} Control Center"
     box_menu_item " ${YELLOW}[d]${NC} Dashboard          ${YELLOW}[g]${NC} Go (Smart Open)      ${YELLOW}[D]${NC} Doctor"
@@ -2533,7 +2624,7 @@ interactive_menu() {
     echo -ne "${CYAN}Auswahl:${NC} "
     read -r choice
     case "${choice:-}" in
-      1) menu_stack_actions text ;;
+      1) menu_stack_actions qwen_coder_ablit ;;
       2) menu_stack_actions text_pro ;;
       3) menu_stack_actions image ;;
       4) menu_stack_actions image_prompt ;;
