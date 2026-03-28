@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import shlex
@@ -20,11 +21,14 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Dict, List, Tuple, Union
 
 import yaml
+
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 STACKS_YAML = SCRIPT_DIR / "stacks.yaml"
@@ -340,12 +344,13 @@ class Instance:
     def from_raw(cls, raw: dict[str, Any]) -> "Instance":
         # Verwende zentrale SSH-Resolution-Logik
         ssh_info = resolve_instance_ssh(raw)
-        
+
         ports = raw.get("ports") or {}
         direct_port = ""
         try:
             direct_port = str(ports.get("22/tcp", [{}])[0].get("HostPort") or "")
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Could not extract direct port: {e}")
             direct_port = ""
         
         return cls(
@@ -922,8 +927,8 @@ def wait_for_ssh_ready(inst: Instance, timeout: int = 180, interval: int = 5) ->
                 if current_status != last_status:
                     info(f"Instanz Status: {current_status} ({int(time.time() - start)}s)")
                     last_status = current_status
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Status check error: {e}")
 
         time.sleep(interval)
 
@@ -1734,9 +1739,9 @@ def cmd_resolve(args) -> int:
                 # Use the fresh instance with resolved SSH info
                 inst = enrich_instance_with_canonical_ssh(fresh_inst)
                 break
-    except Exception:
-        pass
-    
+    except Exception as e:
+        logger.debug(f"Could not refresh instance info: {e}")
+
     if args.json:
         out = {
             "stack": stack,

@@ -1,0 +1,154 @@
+# HERMES API EINRICHTUNG FÜR QWEN CODER ABLITERATED
+
+## VORAUSSETZUNGEN
+- Server läuft auf Remote-Maschine (vast.ai)
+- SSH-Tunnel erstellt: http://127.0.0.1:8082
+- Hermes (oder anderer OpenAI-kompatibler Client) installiert
+
+## API-KONFIGURATION
+
+### Option 1: Hermes Desktop App
+1. Öffne Hermes
+2. Gehe zu Settings → API Configuration
+3. Wähle "Custom OpenAI API"
+4. Trage ein:
+   - **API Base URL**: `http://127.0.0.1:8082/v1`
+   - **API Key**: `sk-no-key-required` (oder beliebiger Text)
+   - **Model**: `qwen-coder-ablit` (oder Modellname aus `/v1/models`)
+
+### Option 2: curl Test
+```bash
+# Teste API-Verbindung
+curl http://127.0.0.1:8082/v1/models
+
+# Chat Completion testen
+curl http://127.0.0.1:8082/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-no-key-required" \
+  -d '{
+    "model": "qwen-coder-ablit",
+    "messages": [
+      {"role": "user", "content": "Schreibe eine Hello World Funktion in Python"}
+    ],
+    "temperature": 0.7
+  }'
+```
+
+### Option 3: Python Client
+```python
+import openai
+
+client = openai.OpenAI(
+    base_url="http://127.0.0.1:8082/v1",
+    api_key="sk-no-key-required"
+)
+
+response = client.chat.completions.create(
+    model="qwen-coder-ablit",
+    messages=[
+        {"role": "user", "content": "Erkläre Python Generatoren"}
+    ],
+    temperature=0.7
+)
+
+print(response.choices[0].message.content)
+```
+
+### Option 4: Ollama-Style (falls Hermes Ollama unterstützt)
+```
+Server URL: http://127.0.0.1:8082
+Model: qwen-coder-ablit
+```
+
+## HERMES SPEZIFISCHE EINSTELLUNGEN
+
+### Für Hermes Web/Desktop:
+1. **Connection Type**: OpenAI API
+2. **API URL**: `http://127.0.0.1:8082/v1`
+3. **API Key**: `sk-no-key-required` (kann leer sein bei llama.cpp)
+4. **Model List**: Automatisch von `/v1/models` abrufen
+5. **Context Window**: 131072 (da wir auf 131K optimiert haben)
+
+### Model-Spezifische Einstellungen:
+- **Temperature**: 0.7 (empfohlen für Coding)
+- **Max Tokens**: 4096
+- **Top P**: 0.9
+- **Presence Penalty**: 0.0
+- **Frequency Penalty**: 0.0
+
+## TROUBLESHOOTING
+
+### Problem: "Model not found"
+```bash
+# Prüfe verfügbare Modelle
+curl http://127.0.0.1:8082/v1/models
+
+# Beispiel-Ausgabe:
+# {"object":"list","data":[{"id":"qwen-coder-ablit","object":"model"}]}
+```
+
+### Problem: Connection refused
+```bash
+# Prüfe ob Server läuft
+curl http://127.0.0.1:8082
+
+# Prüfe ob Tunnel aktiv ist
+netstat -tuln | grep 8082
+```
+
+### Problem: Slow responses
+- Reduziere Context in Hermes auf 65536
+- Reduziere Batch in llama-server auf 128: `-b 128`
+- Prüfe VRAM mit `nvidia-smi`
+
+## AUTOMATISCHE START-KONFIGURATION
+
+Füge diese Zeilen zu deinem Start-Skript hinzu für automatische Hermes-Kompatibilität:
+
+```bash
+# In /root/start_qwen_final.sh oder setup_remote_v3.sh
+# Stelle sicher dass diese Parameter gesetzt sind:
+--host 0.0.0.0  # Für Netzwerkzugriff (optional)
+--port 8082
+--api-key "sk-no-key-required"  # Für einfache Authentifizierung
+```
+
+## ALTERNATIVE CLIENTS
+
+### 1. **ChatGPT-Next-Web** (Web UI)
+```bash
+docker run -d \
+  --name chatgpt-next-web \
+  -p 3000:3000 \
+  -e OPENAI_API_KEY=sk-no-key-required \
+  -e BASE_URL=http://127.0.0.1:8082/v1 \
+  -e CODE=your_password \
+  yidadaa/chatgpt-next-web
+```
+
+### 2. **Open WebUI** (früher Ollama WebUI)
+```bash
+docker run -d \
+  --name open-webui \
+  -p 8080:8080 \
+  -e OLLAMA_API_BASE_URL=http://127.0.0.1:8082 \
+  -v open-webui:/app/backend/data \
+  ghcr.io/open-webui/open-webui:main
+```
+
+### 3. **LM Studio**
+- Base URL: `http://127.0.0.1:8082/v1`
+- API Key: Beliebiger Text
+- Model: Aus Liste wählen
+
+## ZUSAMMENFASSUNG
+
+1. **Hermes einrichten**:
+   - API URL: `http://127.0.0.1:8082/v1`
+   - API Key: `sk-no-key-required`
+   - Model: `qwen-coder-ablit`
+
+2. **Testen** mit curl oder Python Client
+3. **Optimieren** Parameter je nach Bedarf (Temperature, Context)
+
+Dein Qwen Coder Abliterated Model ist jetzt über die OpenAI-kompatible API verfügbar und kann mit Hermes und anderen Clients genutzt werden!

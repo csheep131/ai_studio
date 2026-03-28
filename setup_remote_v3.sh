@@ -941,6 +941,7 @@ start_llama_server() {
       text)             ctx_size=8192 ;;
       text_pro)         ctx_size=262144 ;;
       qwen_coder_ablit) ctx_size=262144 ;;
+      qwen_opus)        ctx_size=262144 ;;
       *)                ctx_size=8192 ;;
     esac
   fi
@@ -954,17 +955,19 @@ start_llama_server() {
     return 0
   fi
 
-  # TurboQuant-Parameter für qwen_coder_ablit
+  # TurboQuant-Parameter für qwen_coder_ablit und qwen_opus
   local turbo_args=""
-  if [[ "$stack_key" == "qwen_coder_ablit" ]]; then
-    # Optimierte Parameter für RTX A6000 (48GB VRAM)
-    turbo_args="-ctk turbo3 -ctv turbo3 -fa on -b 256"
-    log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size}, TurboQuant: turbo3, batch: 256)..."
+  local turbo_env=""
+  if [[ "$stack_key" == "qwen_coder_ablit" || "$stack_key" == "qwen_opus" ]]; then
+    # Optimierte Parameter mit TURBO_LAYER_ADAPTIVE für maximalen Context (262K)
+    turbo_args="-ctk turbo3 -ctv turbo3 -fa on -b 512"
+    turbo_env="TURBO_LAYER_ADAPTIVE=1"
+    log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size}, TurboQuant: turbo3, TURBO_LAYER_ADAPTIVE=1, batch: 512)..."
   else
     log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size})..."
   fi
   
-  nohup stdbuf -oL -eL "${LLAMA_SERVER_BIN}" \
+  nohup stdbuf -oL -eL env ${turbo_env} "${LLAMA_SERVER_BIN}" \
     -m "${model_path}" \
     --host "${BIND_ADDR}" \
     --port "${port}" \
@@ -982,11 +985,11 @@ write_onstart_llama_server() {
   local port="$3"
   local model_path="$4"
   local ctx_size="${5:-8192}"
-  
-  # TurboQuant-Parameter für qwen_coder_ablit
+
+  # TurboQuant-Parameter für qwen_coder_ablit und qwen_opus
   local use_turboquant="false"
   local turbo_layers="3"
-  if [[ "$stack_key" == "qwen_coder_ablit" ]]; then
+  if [[ "$stack_key" == "qwen_coder_ablit" || "$stack_key" == "qwen_opus" ]]; then
     use_turboquant="true"
     turbo_layers="3"
   fi
@@ -1158,9 +1161,8 @@ write_onstart_text_pro() {
 
 write_onstart_qwen_coder_ablit() {
   local model_path="$1"
-  # Optimierte Parameter für RTX A6000 (48GB VRAM)
-  # Reduzierte Batch-Größe und Context für bessere VRAM-Nutzung
-  local ctx_size="${2:-131072}"  # 131K statt 262K für 48GB VRAM
+  # 262K Context mit TURBO_LAYER_ADAPTIVE=1 für adaptive Layer-Quantisierung
+  local ctx_size="${2:-262144}"  # 262K mit adaptiver Layer-Quantisierung
   
   cat > "${ONSTART}" <<EOF
 #!/usr/bin/env bash
@@ -1209,14 +1211,15 @@ ensure_model_path
 
 if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
   log "Starting llama-server on \${BIND_ADDR}:\${PORT}..."
-  log "Using TurboQuant KV-Cache (turbo3) for reduced VRAM usage"
-  log "Optimized for RTX A6000 (48GB VRAM): -b 256 -c \${CTX_SIZE}"
+  log "Using TurboQuant KV-Cache (turbo3) + TURBO_LAYER_ADAPTIVE=1"
+  log "262K Context mit adaptiver Layer-Quantisierung: -b 512 -c \${CTX_SIZE}"
   
-  # Optimierte Parameter für 48GB VRAM:
-  # -b 256 statt 512 (reduzierter Batch für weniger VRAM)
+  # TurboQuant mit adaptiver Layer-Quantisierung für 262K Context:
+  # TURBO_LAYER_ADAPTIVE=1 (adaptive layer quantization für max VRAM-Ersparnis)
+  # -b 512 (volle Batch-Größe)
   # -ctk turbo3 -ctv turbo3 (TurboQuant KV-Cache)
   # -fa on (flash attention)
-  nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \
+  TURBO_LAYER_ADAPTIVE=1 nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \
     -m "\${MODEL_PATH}" \
     --host "\${BIND_ADDR}" \
     --port "\${PORT}" \
@@ -1225,7 +1228,7 @@ if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
     -ctk turbo3 \
     -ctv turbo3 \
     -fa on \
-    -b 256 \
+    -b 512 \
     >"\${LOG_DIR}/qwen_coder_ablit.log" 2>&1 &
   disown
 fi
@@ -1253,6 +1256,105 @@ fi
 EOF
   chmod +x "${ONSTART}"
   log "Created ${ONSTART} for qwen_coder_ablit stack (optimized for 48GB VRAM)."
+}
+
+write_onstart_qwen_opus() {
+  local model_path="$1"
+  # 262K Context mit TURBO_LAYER_ADAPTIVE=1 für adaptive Layer-Quantisierung
+  local ctx_size="${2:-262144}"  # 262K mit adaptiver Layer-Quantisierung
+
+  cat > "${ONSTART}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_DIR="/var/log/stack"
+BIND_ADDR="127.0.0.1"
+LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN}"
+MODEL_PATH="${model_path}"
+PORT="${SERVICE_PORT}"
+CTX_SIZE="${ctx_size}"
+
+log() { echo "[\$(date '+%H:%M:%S')] \$*"; }
+ensure_model_path() {
+  if [[ "\$MODEL_PATH" =~ ^(.+)\.part([0-9]+)of([0-9]+)$ ]]; then
+    local merged_path="\${BASH_REMATCH[1]}"
+    local total_parts="\${BASH_REMATCH[3]}"
+    local idx part_path
+    if [[ -f "\${merged_path}" ]]; then
+      MODEL_PATH="\${merged_path}"
+      return 0
+    fi
+    log "Combining \${total_parts} model parts into \${merged_path}..."
+    part_path="\${merged_path}.part1of\${total_parts}"
+    if [[ ! -f "\${part_path}" ]]; then
+      log "Missing model part: \${part_path}"
+      return 1
+    fi
+    mv "\${part_path}" "\${merged_path}"
+    for idx in \$(seq 2 "\${total_parts}"); do
+      part_path="\${merged_path}.part\${idx}of\${total_parts}"
+      if [[ ! -f "\${part_path}" ]]; then
+        log "Missing model part: \${part_path}"
+        return 1
+      fi
+      log "Merge \${idx}/\${total_parts}: \${part_path}"
+      cat "\${part_path}" >> "\${merged_path}"
+      rm -f "\${part_path}" >/dev/null 2>&1 || true
+    done
+    MODEL_PATH="\${merged_path}"
+  fi
+}
+
+mkdir -p "\${LOG_DIR}"
+log "=== Starting QWEN_OPUS llama.cpp ==="
+ensure_model_path
+
+if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
+  log "Starting llama-server on \${BIND_ADDR}:\${PORT}..."
+  log "Using TurboQuant KV-Cache (turbo3) + TURBO_LAYER_ADAPTIVE=1"
+  log "262K Context mit adaptiver Layer-Quantisierung: -b 512 -c \${CTX_SIZE}"
+
+  # TurboQuant mit adaptiver Layer-Quantisierung für 262K Context:
+  # TURBO_LAYER_ADAPTIVE=1 (adaptive layer quantization für max VRAM-Ersparnis)
+  # -b 512 (volle Batch-Größe)
+  # -ctk turbo3 -ctv turbo3 (TurboQuant KV-Cache)
+  # -fa on (flash attention)
+  TURBO_LAYER_ADAPTIVE=1 nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \
+    -m "\${MODEL_PATH}" \
+    --host "\${BIND_ADDR}" \
+    --port "\${PORT}" \
+    -c "\${CTX_SIZE}" \
+    -ngl 999 \
+    -ctk turbo3 \
+    -ctv turbo3 \
+    -fa on \
+    -b 512 \
+    >"\${LOG_DIR}/qwen_opus.log" 2>&1 &
+  disown
+fi
+
+ready=0
+for i in \$(seq 1 60); do
+  if curl -sf "http://\${BIND_ADDR}:\${PORT}" >/dev/null 2>&1 || \
+     curl -sf "http://\${BIND_ADDR}:\${PORT}/health" >/dev/null 2>&1 || \
+     curl -sf "http://\${BIND_ADDR}:\${PORT}/v1/models" >/dev/null 2>&1; then
+    log "QWEN_OPUS ready on port \${PORT}"
+    ready=1
+    break
+  fi
+  if (( i == 1 || i % 10 == 0 )); then
+    log "QWEN_OPUS noch nicht bereit (\${i}s). Log: \${LOG_DIR}/qwen_opus.log"
+  fi
+  sleep 1
+done
+
+if (( ready == 1 )); then
+  log "QWEN_OPUS started."
+else
+  log "QWEN_OPUS noch im Start. Pruefe \${LOG_DIR}/qwen_opus.log"
+fi
+EOF
+  chmod +x "${ONSTART}"
+  log "Created ${ONSTART} for qwen_opus stack (optimized for 48GB VRAM)."
 }
 
 install_open_webui() {
@@ -3485,6 +3587,18 @@ case "${STACK_TYPE}" in
     start_llama_server "qwen_coder_ablit" "QWEN_CODER_ABLIT llama.cpp" "${SERVICE_PORT}" "${qwen_coder_model_path}" 262144
     write_manifest "qwen_coder_ablit" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
     log "QWEN_CODER_ABLIT llama.cpp stack ready on port ${SERVICE_PORT} with 262,144 token context (TurboQuant turbo3)"
+    ;;
+  qwen_opus)
+    STACK_MODEL="${STACK_MODEL:-LuffyTheFox/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-GGUF}"
+    STACK_TEMPLATE="${STACK_TEMPLATE:-nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04}"
+    SERVICE_PORT="${SERVICE_PORT:-8083}"
+    install_llama_cpp
+    install_hf_hub
+    qwen_opus_model_path="$(resolve_gguf_model_path "${STACK_MODEL}" "${STACK_MODEL_FILE_HINT}" "qwen_opus")"
+    write_onstart_qwen_opus "${qwen_opus_model_path}" 262144
+    start_llama_server "qwen_opus" "QWEN_OPUS llama.cpp" "${SERVICE_PORT}" "${qwen_opus_model_path}" 262144
+    write_manifest "qwen_opus" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
+    log "QWEN_OPUS llama.cpp stack ready on port ${SERVICE_PORT} with 262,144 token context (TurboQuant turbo3)"
     ;;
   image)
     STACK_MODEL="${STACK_MODEL:-$IMAGE_DEFAULT_MODEL}"

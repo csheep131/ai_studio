@@ -161,14 +161,15 @@ get_live_instance_for_stack() {
   # Live API Abfrage
   local instances_json
   instances_json=$(python3 "${VAST_PY}" list --json 2>/dev/null || echo '[]')
-  
+
   # Wenn expected_iid bekannt, prüfe ob diese Instanz existiert
   if [[ -n "$expected_iid" ]]; then
+    # Hinweis: vast.py gibt IDs als Strings zurück, daher ohne tonumber vergleichen
     local found
-    found=$(echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == ($iid | tonumber)) | .id' 2>/dev/null)
+    found=$(echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == $iid) | .id' 2>/dev/null)
     if [[ -n "$found" ]]; then
       # Instanz existiert noch, gib Details zurück
-      echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == ($iid | tonumber))'
+      echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == $iid)'
       return 0
     fi
   fi
@@ -218,29 +219,41 @@ _refresh_stack_states_auto() {
 
     if [[ -n "$expected_iid" ]]; then
       # Prüfen ob Instanz noch existiert
+      # Hinweis: vast.py gibt IDs als Strings zurück, daher ohne tonumber vergleichen
       local found
-      found=$(echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == ($iid | tonumber)) | .id' 2>/dev/null)
-      
+      found=$(echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == $iid) | .id' 2>/dev/null)
+
       if [[ -n "$found" ]]; then
-        # Instanz existiert noch, aktualisiere IP/Port
+        # Instanz existiert noch, aktualisiere Status aber behalte funktionierende Ports
         local inst_data
-        inst_data=$(echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == ($iid | tonumber))')
+        inst_data=$(echo "$instances_json" | jq -r --arg iid "$expected_iid" '.[] | select(.id == $iid)')
         
-        local ip port instance_status ssh_source
-        # `vast.py list --json` liefert bereits den aufgelösten SSH-Host/-Port.
-        port=$(echo "$inst_data" | jq -r '.ssh_port // empty')
-        ip=$(echo "$inst_data" | jq -r '.ssh_host // .public_ip // .public_ipaddr // empty')
+        local api_ip api_port instance_status ssh_source
+        api_port=$(echo "$inst_data" | jq -r '.ssh_port // empty')
+        api_ip=$(echo "$inst_data" | jq -r '.ssh_host // .public_ip // .public_ipaddr // empty')
         instance_status=$(echo "$inst_data" | jq -r '.status // "unknown"')
         ssh_source=$(echo "$inst_data" | jq -r '.ssh_source // "auto_refresh"')
 
-        if [[ -n "$ip" && -n "$port" ]]; then
+        # Behalte bestehende funktionierende Ports (API-Ports können off-by-one sein)
+        local existing_ip existing_port existing_candidates existing_source
+        existing_ip=$(grep -oP 'INSTANCE_IP="\K[^"]+' "$sf" 2>/dev/null || echo "")
+        existing_port=$(grep -oP 'INSTANCE_PORT="\K[^"]+' "$sf" 2>/dev/null || echo "")
+        existing_candidates=$(grep -oP 'INSTANCE_PORT_CANDIDATES="\K[^"]+' "$sf" 2>/dev/null || echo "")
+        existing_source=$(grep -oP 'SSH_SOURCE="\K[^"]+' "$sf" 2>/dev/null || echo "")
+
+        # Verwende existierende Ports wenn vorhanden, sonst API-Ports
+        local use_ip="${existing_ip:-$api_ip}"
+        local use_port="${existing_port:-$api_port}"
+        local use_candidates="${existing_candidates:-$api_port}"
+
+        if [[ -n "$use_ip" && -n "$use_port" ]]; then
           cat > "$sf" <<EOF
 INSTANCE_ID="${expected_iid}"
-INSTANCE_IP="${ip}"
-INSTANCE_PORT="${port}"
-INSTANCE_PORT_CANDIDATES="${port}"
+INSTANCE_IP="${use_ip}"
+INSTANCE_PORT="${use_port}"
+INSTANCE_PORT_CANDIDATES="${use_candidates}"
 INSTANCE_STATUS="${instance_status}"
-SSH_SOURCE="${ssh_source}"
+SSH_SOURCE="${existing_source:-$ssh_source}"
 STACK="${stack_key}"
 EOF
           chmod 600 "$sf"
@@ -302,9 +315,14 @@ except Exception as e:
 if not isinstance(data, list) or len(data) == 0:
     sys.exit(1)
 
-# State-Dateien einlesen für Stack-Zuordnung
-stacks = ['text', 'text_pro', 'image', 'video', 'video_lora', 'qwen_coder_ablit']
-stack_labels = {'text': 'Text', 'text_pro': 'Text Pro', 'image': 'Bild', 'video': 'Video', 'video_lora': 'Video LoRA', 'qwen_coder_ablit': 'Qwen Coder'}
+# State-Dateien einlesen für Stack-Zuordnung (dynamisch aus stacks.yaml)
+try:
+    import yaml as _y
+    _cfg = _y.safe_load(open(os.path.join(script_dir, 'stacks.yaml')))
+    stacks = list(_cfg.get('stacks', {}).keys())
+except:
+    stacks = ['text', 'text_pro', 'image', 'video', 'video_lora', 'qwen_coder_ablit', 'qwen_opus']
+stack_labels = {'text': 'Text', 'text_pro': 'Text Pro', 'image': 'Bild', 'video': 'Video', 'video_lora': 'Video LoRA', 'qwen_coder_ablit': 'Qwen Coder', 'qwen_opus': 'Qwen Opus'}
 
 stack_assignments = {}
 for stack in stacks:
@@ -546,6 +564,7 @@ get_stack_label() {
       video)       echo "Wan2.1 Video Studio" ;;
       video_lora)  echo "Wan2.1 Video LoRA Studio" ;;
       qwen_coder_ablit) echo "Qwen3-Coder-Next-abliterated (GLX5090)" ;;
+      qwen_opus)   echo "Qwen3.5-27B-Opus-Uncensored (Kostengünstig)" ;;
       *)           echo "$stack" ;;
     esac
   else
@@ -730,7 +749,7 @@ for inst in data:
     ssh = f'{ssh_host}:{ssh_port}' if ssh_host != '-' and ssh_port else ssh_host
     stack_tag = stacks.get(iid, '')
     if stack_tag:
-        stack_tag = {'text': '[Text]', 'text_pro': '[TextPro]', 'image': '[Bild]', 'video': '[Video]', 'video_lora': '[VidLoRA]'}.get(stack_tag, '')
+        stack_tag = {'text': '[Text]', 'text_pro': '[TextPro]', 'image': '[Bild]', 'image_prompt': '[FLUX2]', 'video': '[Video]', 'video_lora': '[VidLoRA]', 'qwen_coder_ablit': '[QwenCod]', 'qwen_opus': '[QwenOpus]'}.get(stack_tag, '')
 
     # Color status
     status_colors = {'running': GREEN, 'stopped': YELLOW, 'exited': RED, 'offline': RED}
@@ -1895,7 +1914,7 @@ menu_vast_instanzen() {
     echo
 
     box_menu_item " ${YELLOW}[1]${NC} Neue Instanz mieten (text)"
-    box_menu_item " ${YELLOW}[2]${NC} Neue Instanz mieten (text_pro - H100+)"
+    box_menu_item " ${YELLOW}[2]${NC} Neue Instanz mieten (qwen_opus - RTX)"
     box_menu_item " ${YELLOW}[3]${NC} Neue Instanz mieten (image)"
     box_menu_item " ${YELLOW}[4]${NC} Neue Instanz mieten (video)"
     box_menu_item " ${YELLOW}[5]${NC} Neue Instanz mieten (video_lora)"
@@ -1912,7 +1931,7 @@ menu_vast_instanzen() {
 
     case "${choice:-}" in
       1) rent_instance_for_stack "text" ;;
-      2) rent_instance_for_stack "text_pro" ;;
+      2) rent_instance_for_stack "qwen_opus" ;;
       3) rent_instance_for_stack "image" ;;
       4) rent_instance_for_stack "video" ;;
       5) rent_instance_for_stack "video_lora" ;;
@@ -2510,7 +2529,7 @@ Usage:
   ./studio.sh vast            Vast-Verwaltung
   ./studio.sh help            Diese Hilfe
 
-Stacks: text | text_pro (H100+) | image | video | video_lora
+Stacks: text | text_pro | qwen_opus (kostengünstig) | image | video | video_lora
 
 Examples:
   ./studio.sh go text         # Vollautomatisch: mieten, starten, tunneln
@@ -2528,12 +2547,13 @@ menu_stack_actions() {
 
   case "$stack" in
     text)        stack_name="Text" ;;
-    text_pro)    stack_name="Text Pro (H100+)" ;;
+    text_pro)    stack_name="Text Pro" ;;
     image)       stack_name="Bild" ;;
     image_prompt) stack_name="FLUX.2 T2I" ;;
     video)       stack_name="Video" ;;
     video_lora)  stack_name="Video LoRA" ;;
     qwen_coder_ablit) stack_name="Qwen Coder (GLX5090)" ;;
+    qwen_opus)   stack_name="Qwen Opus (RTX)" ;;
   esac
 
   while true; do
@@ -2614,7 +2634,7 @@ interactive_menu() {
   while true; do
     render_status_overview
     box_menu_start "HAUPTMENÜ"
-    box_menu_item " ${YELLOW}[1]${NC} Qwen Coder (GLX5090) ${YELLOW}[2]${NC} Text Pro UI (H100+)  ${YELLOW}[3]${NC} Bild-UI"
+    box_menu_item " ${YELLOW}[1]${NC} Qwen Coder (GLX5090) ${YELLOW}[2]${NC} Qwen Opus (RTX)    ${YELLOW}[3]${NC} Bild-UI"
     box_menu_item " ${YELLOW}[4]${NC} FLUX.2 T2I         ${YELLOW}[5]${NC} Video-UI             ${YELLOW}[6]${NC} Video LoRA UI"
     box_menu_item " ${YELLOW}[7]${NC} Video-Workflow     ${YELLOW}[8]${NC} Vast-Instanzen       ${YELLOW}[c]${NC} Control Center"
     box_menu_item " ${YELLOW}[d]${NC} Dashboard          ${YELLOW}[g]${NC} Go (Smart Open)      ${YELLOW}[D]${NC} Doctor"
@@ -2625,7 +2645,7 @@ interactive_menu() {
     read -r choice
     case "${choice:-}" in
       1) menu_stack_actions qwen_coder_ablit ;;
-      2) menu_stack_actions text_pro ;;
+      2) menu_stack_actions qwen_opus ;;
       3) menu_stack_actions image ;;
       4) menu_stack_actions image_prompt ;;
       5) menu_stack_actions video ;;

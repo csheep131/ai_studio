@@ -94,7 +94,7 @@ stacks:
     - pip
     default_model: black-forest-labs/FLUX.2-dev
     max_dph: 4.5
-    disk_gb: 120
+    disk_gb: 150
     min_vram_mb: 49152
     gpu_regex: A6000|A100|H100|H200|L40S|4090
     loras:
@@ -177,6 +177,30 @@ stacks:
     gpu_regex: RTX.*5090|RTX.*6000|B200|H200|H100|A100|A800|L40S|L40|A6000|A5000
     ctx_size: 262144
     turboquant: true
+  qwen_opus:
+    label: Qwen3.5-27B-Claude-4.6-Opus-Uncensored (Kostengünstig)
+    service_port: 8083
+    health_path: /
+    vast_template: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+    vast_runtype: jupyter
+    vast_target_state: running
+    vast_cancel_unavail: true
+    local_port: 8083
+    api_remote_port: 8083
+    api_tunnel_port: 11438
+    required_files:
+    - /onstart.sh
+    required_commands:
+    - llama-server
+    - python3
+    default_model: LuffyTheFox/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-GGUF
+    model_file_hint: "Qwen3.5-27B-Uncensored-KL.Q4_K_M.gguf"
+    max_dph: 3.5
+    disk_gb: 80
+    min_vram_mb: 49152
+    gpu_regex: RTX.*5090|RTX.*6000|RTX.*4090|B200|H200|H100|A100|A800|L40S|L40|A6000|A5000
+    ctx_size: 262144
+    turboquant: true
   comfyui:
     label: "ComfyUI Pro Workflows (Flux + SDXL + Custom Nodes)"
     service_port: 7867
@@ -244,3 +268,8 @@ presets:
     model: Wan-AI/Wan2.1-T2V-14B-Diffusers
     min_vram_mb: 81920
     notes: "Wan2.1 mit LoRA-Auswahl, H100+ und mehr Disk"
+  opus_chat:
+    description: Qwen3.5-27B Claude-4.6-Opus Uncensored Chat
+    stack: qwen_opus
+    model: LuffyTheFox/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-GGUF
+    notes: "Kostengünstig auf RTX 5090/6000/4090 mit TurboQuant, 262K Context"

@@ -25,7 +25,7 @@ print(f"🚀 Lade {MODEL_ID}...")
 pipe = FluxPipeline.from_pretrained(
     MODEL_ID,
     torch_dtype=torch.bfloat16,
-    device_map="auto" if torch.cuda.is_device_available() else None,
+    device_map="auto" if torch.cuda.is_available() else None,
 )
 
 if torch.cuda.is_available():

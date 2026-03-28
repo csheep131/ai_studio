@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Text Pro API Client
-Usage: 
+Usage:
   python text_pro_api_client.py "Your prompt here"
   python text_pro_api_client.py --stream "Your prompt here"
   python text_pro_api_client.py --models
@@ -9,9 +9,13 @@ Usage:
 
 import sys
 import argparse
+import logging
 import requests
 import json
-from typing import Generator, Optional
+from typing import Generator, Optional, Union
+
+logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 class TextProClient:
     def __init__(self, base_url: str = "http://127.0.0.1:8081/v1"):
@@ -56,13 +60,13 @@ class TextProClient:
         return response.json()
     
     def chat(
-        self, 
-        prompt: str, 
+        self,
+        prompt: str,
         system_message: Optional[str] = None,
         temperature: float = 0.7,
         max_tokens: int = 1000,
         stream: bool = False
-    ) -> Generator[str, None, None] or str:
+    ) -> Union[Generator[str, None, None], str]:
         """
         Send a chat completion request.
         
@@ -136,8 +140,8 @@ class TextProClient:
                                 delta = chunk['choices'][0].get('delta', {})
                                 if 'content' in delta:
                                     yield delta['content']
-                        except json.JSONDecodeError:
-                            pass
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"JSON decode error: {e}")
     
     def health_check(self) -> bool:
         """Check if API is healthy."""
@@ -148,7 +152,8 @@ class TextProClient:
                 timeout=5
             )
             return response.status_code == 200
-        except:
+        except Exception as e:
+            logger.warning(f"Health check failed: {e}")
             return False
 
 def main():

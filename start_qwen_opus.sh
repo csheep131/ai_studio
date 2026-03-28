@@ -1,12 +1,12 @@
 #!/bin/bash
-# Optimiertes Startskript für Qwen Coder Abliterated auf RTX A6000 (48GB VRAM)
+# Optimiertes Startskript für Qwen3.5-27B-Claude-4.6-Opus auf RTX A6000/5090/6000 (48GB VRAM)
 
 set -euo pipefail
 
-# Parameter für RTX A6000 (48GB VRAM)
-MODEL_PATH="/opt/models/qwen_coder_ablit/Qwen3-Coder-Next-abliterated-Q4_K_M.gguf"
+# Parameter für RTX A6000/5090/6000 (48GB VRAM)
+MODEL_PATH="/opt/models/qwen_opus/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-Q4_K_M.gguf"
 BIND_ADDR="127.0.0.1"
-PORT="8082"
+PORT="8083"
 CTX_SIZE="262144"  # 262K mit TURBO_LAYER_ADAPTIVE=1
 BATCH_SIZE="512"   # Volle Batch-Größe mit adaptiver Layer-Quantisierung
 
@@ -26,26 +26,14 @@ if [[ ! -f "$MODEL_PATH" ]]; then
 fi
 
 # Starte den Server mit optimierten Parametern
-echo "=== Starte QWEN_CODER_ABLIT llama.cpp ==="
+echo "=== Starte QWEN_OPUS llama.cpp ==="
 echo "Modell: $(basename "$MODEL_PATH")"
 echo "Port: $PORT"
 echo "Context: $CTX_SIZE Token"
 echo "Batch: $BATCH_SIZE"
 echo "TurboQuant: turbo3 aktiviert"
-echo "GPU: RTX A6000 (48GB VRAM optimiert)"
+echo "GPU: RTX A6000/5090/6000 (48GB VRAM optimiert)"
 echo "TURBO_LAYER_ADAPTIVE: aktiviert"
-
-# Dynamische GPU-Layer-Erkennung:
-# Für große Modelle (>40GB) auf 48GB VRAM: ngl 48 (1 Layer auf CPU für VRAM-Headroom)
-# Für kleinere Modelle (<30GB): ngl 999 (alle Layer auf GPU)
-MODEL_SIZE_GB=$(du -b "$MODEL_PATH" 2>/dev/null | awk '{printf "%.0f", $1/1073741824}')
-if [[ "$MODEL_SIZE_GB" -gt 40 ]]; then
-    NGL=48
-    echo "Großes Modell (${MODEL_SIZE_GB}GB): Verwende ngl $NGL (1 Layer auf CPU für VRAM-Headroom)"
-else
-    NGL=999
-    echo "Modell (${MODEL_SIZE_GB}GB): Verwende ngl $NGL (alle Layer auf GPU)"
-fi
 
 # Starte den Server mit adaptiver Layer-Quantisierung
 nohup stdbuf -oL -eL env TURBO_LAYER_ADAPTIVE=1 "$LLAMA_SERVER_BIN" \
@@ -53,16 +41,16 @@ nohup stdbuf -oL -eL env TURBO_LAYER_ADAPTIVE=1 "$LLAMA_SERVER_BIN" \
   --host "$BIND_ADDR" \
   --port "$PORT" \
   -c "$CTX_SIZE" \
-  -ngl "$NGL" \
+  -ngl 999 \
   -ctk turbo3 \
   -ctv turbo3 \
   -fa on \
   -b "$BATCH_SIZE" \
-  >"/tmp/qwen_coder_ablit.log" 2>&1 &
+  >"/tmp/qwen_opus.log" 2>&1 &
 
 SERVER_PID=$!
 echo "Server gestartet mit PID: $SERVER_PID"
-echo "Log: /tmp/qwen_coder_ablit.log"
+echo "Log: /tmp/qwen_opus.log"
 
 # Warte auf Server-Start
 echo -n "Warte auf Server-Bereitschaft..."
@@ -81,6 +69,6 @@ done
 
 echo " ✗"
 echo "Server nicht innerhalb von 30 Sekunden gestartet"
-echo "Prüfe Log: /tmp/qwen_coder_ablit.log"
+echo "Prüfe Log: /tmp/qwen_opus.log"
 kill $SERVER_PID 2>/dev/null || true
 exit 1

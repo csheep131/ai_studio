@@ -1,12 +1,9 @@
 from gradio_client import Client, handle_file
-import shutil
 import os
 from PIL import Image
-import time
 import random
 import cv2  # Für die Video-Erstellung
 import numpy as np
-import requests
 import json
 from openai import OpenAI
 
