@@ -1,0 +1,78 @@
+# DIREKTE FIX-BEFEHLE FÜR REMOTE-SERVER
+# Führe diese Befehle direkt auf dem Remote-Server aus
+
+# 1. Backup erstellen
+cp /root/setup_remote_v3.sh /root/setup_remote_v3.sh.backup.fixed
+
+# 2. Batch-Größe korrigieren (einfache sed-Befehle)
+sed -i 's/-b 512/-b 256/g' /root/setup_remote_v3.sh
+
+# 3. Port-Parameter korrigieren (entferne Anführungszeichen um ${PORT})
+sed -i 's/--port "\${PORT}"/--port \${PORT}/g' /root/setup_remote_v3.sh
+
+# 4. Prüfe ob Port-Parameter korrekt sind
+echo "=== Prüfe Port-Parameter ==="
+grep -n "port" /root/setup_remote_v3.sh | head -5
+
+# 5. Direktes Startskript erstellen
+cat > /root/start_qwen_direct.sh << 'EOF'
+#!/bin/bash
+# Direkter Start für RTX A6000 mit optimierten Parametern
+
+# Modell finden
+MODEL_PATH="/opt/models/qwen_coder_ablit/$(ls /opt/models/qwen_coder_ablit/*.gguf 2>/dev/null | head -1)"
+
+if [[ ! -f "$MODEL_PATH" ]]; then
+    echo "Fehler: Kein Modell gefunden"
+    exit 1
+fi
+
+echo "Starte mit optimierten Parametern für 48GB VRAM..."
+echo "Modell: $(basename "$MODEL_PATH")"
+echo "Port: 8082"
+echo "Context: 131072"
+echo "Batch: 256"
+
+# Stoppe alten Server
+pkill -f "llama-server.*--port 8082" 2>/dev/null || true
+sleep 2
+
+# Starte neuen Server
+nohup llama-server \
+  -m "$MODEL_PATH" \
+  --host 127.0.0.1 \
+  --port 8082 \
+  -c 131072 \
+  -ngl 999 \
+  -ctk turbo3 \
+  -ctv turbo3 \
+  -fa on \
+  -b 256 \
+  >/var/log/stack/qwen_direct.log 2>&1 &
+
+echo "Server PID: $!"
+echo "Log: /var/log/stack/qwen_direct.log"
+
+# Teste Verbindung
+sleep 3
+echo "Teste Verbindung..."
+curl -s http://127.0.0.1:8082/v1/models && echo " ✓ Server läuft" || echo " ✗ Server nicht erreichbar"
+EOF
+
+chmod +x /root/start_qwen_direct.sh
+
+# 6. Server starten
+echo "=== Starte Server ==="
+/root/start_qwen_direct.sh
+
+# 7. Status prüfen
+echo "=== Status ==="
+sleep 2
+ps aux | grep llama-server | grep -v grep
+echo "=== VRAM ==="
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+echo "=== Log ==="
+tail -5 /var/log/stack/qwen_direct.log 2>/dev/null || echo "Noch kein Log"
+
+echo "=== FERTIG ==="
+echo "Teste mit: curl http://127.0.0.1:8082/v1/models"

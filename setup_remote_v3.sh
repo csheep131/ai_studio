@@ -585,69 +585,130 @@ _try_install_prebuilt_llama() {
 }
 
 _build_llama_cpp_from_source() {
-  # Source build with optimizations:
-  # - Minimal clone (shallow, no tags)
-  # - Only build llama-server (not all tools)
-  # - Release build with CUDA
-  # - Clean up build artifacts after success
-  # - Heartbeat during long build to prevent SSH timeout
+  # TurboQuant CUDA Build mit KV-Cache-Quantisierung für massive VRAM-Ersparnis
+  # Ermöglicht 262K Context auf 48GB VRAM durch turbo3 KV-Cache
 
-  log "Cloning llama.cpp (shallow, minimal)..."
+  log "Cloning llama-cpp-turboquant-cuda (feature/turboquant-kv-cache)..."
 
-  # Use minimal clone: depth=1, no tags, single branch
+  # TurboQuant Fork klonen statt upstream
   if [[ ! -d "${LLAMA_CPP_DIR}/.git" ]]; then
-    git clone --depth 1 --no-tags --single-branch \
-      https://github.com/ggml-org/llama.cpp.git "${LLAMA_CPP_DIR}" 2>/dev/null || {
-      log "✗ Failed to clone llama.cpp"
+    git clone https://github.com/spiritbuun/llama-cpp-turboquant-cuda.git "${LLAMA_CPP_DIR}" 2>/dev/null || {
+      log "✗ Failed to clone llama-cpp-turboquant-cuda"
+      return 1
+    }
+    cd "${LLAMA_CPP_DIR}"
+    git checkout feature/turboquant-kv-cache 2>/dev/null || {
+      log "✗ Failed to checkout feature/turboquant-kv-cache"
       return 1
     }
   else
-    log "llama.cpp source already present"
+    log "llama-cpp-turboquant-cuda source already present"
   fi
 
   # Check if already built
   if [[ -x "${LLAMA_SERVER_BIN}" ]]; then
-    log "llama.cpp already built at ${LLAMA_SERVER_BIN}"
+    log "llama-server already built at ${LLAMA_SERVER_BIN}"
     return 0
   fi
 
-  log "Building llama-server with CUDA (this may take 5-10 minutes)..."
+  log "Building llama-server with TurboQuant CUDA (this may take 10-15 minutes)..."
 
   # Install build dependencies if missing
   if ! command -v cmake &>/dev/null; then
     log "Installing cmake..."
     apt-get update -qq && apt-get install -y -qq cmake >/dev/null 2>&1 || true
   fi
+  if ! command -v ninja-build &>/dev/null; then
+    log "Installing ninja..."
+    apt-get update -qq && apt-get install -y -qq ninja-build >/dev/null 2>&1 || true
+  fi
 
-  # Configure with minimal options
-  # Only build llama-server, skip tests and examples
+  # Dynamische GPU-Architektur-Erkennung für CUDA
+  local cuda_arch_flags=""
+  if command -v nvidia-smi &>/dev/null; then
+    log "Detecting GPU architecture for CUDA build..."
+    local compute_cap_raw compute_cap
+    
+    # Compute Capability im Format "X.Y" abrufen (z.B. "8.6" für RTX 3050)
+    compute_cap_raw=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1)
+    
+    if [[ -n "$compute_cap_raw" ]]; then
+      # Format "X.Y" in "XY" umwandeln (z.B. "8.6" -> "86")
+      compute_cap=$(echo "$compute_cap_raw" | tr -d '.')
+      log "Detected GPU compute capability: $compute_cap_raw -> sm_$compute_cap"
+      
+      # Basierend auf der Compute Capability die richtigen Architekturen auswählen
+      case "$compute_cap" in
+        35|37)  # Kepler (GK104, GK110)
+          cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=35;37"
+          ;;
+        50|52|53)  # Maxwell (GM107, GM200)
+          cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=50;52;53"
+          ;;
+        60|61|62)  # Pascal (GP100, GP102, GP104)
+          cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=60;61;62"
+          ;;
+        70|72|75)  # Volta (GV100) & Turing (TU102, TU104, TU106)
+          cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=70;72;75"
+          ;;
+        80|86|89)  # Ampere (GA100, GA102, GA104) & Ada Lovelace (AD102, AD104)
+          if [[ "$compute_cap" == "80" ]]; then
+            cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=80"
+          elif [[ "$compute_cap" == "86" ]]; then
+            cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=86"
+          elif [[ "$compute_cap" == "89" ]]; then
+            cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=89"
+          fi
+          ;;
+        90)  # Hopper (GH100)
+          cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=90"
+          ;;
+        *)
+          log "Unknown compute capability $compute_cap, using default CUDA architectures"
+          # Standard-Architekturen für moderne GPUs
+          cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=70;75;80;86"
+          ;;
+      esac
+      
+      log "Using CUDA architectures: $cuda_arch_flags"
+    else
+      log "Could not detect GPU compute capability, using default CUDA architectures"
+      cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=70;75;80;86"
+    fi
+  else
+    log "nvidia-smi not available, using default CUDA architectures"
+    cuda_arch_flags="-DCMAKE_CUDA_ARCHITECTURES=70;75;80;86"
+  fi
+
+  # Configure with TurboQuant CUDA options
   if [[ ! -f "${LLAMA_CPP_BUILD_DIR}/CMakeCache.txt" ]]; then
     cmake -S "${LLAMA_CPP_DIR}" -B "${LLAMA_CPP_BUILD_DIR}" \
       -DGGML_CUDA=ON \
-      -DGGML_NATIVE=OFF \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_NATIVE=ON \
+      -DGGML_CUDA_FA=ON \
+      -DGGML_CUDA_FA_ALL_QUANTS=ON \
       -DGGML_BUILD_TESTS=OFF \
       -DGGML_BUILD_EXAMPLES=OFF \
       -DGGML_BUILD_SERVER=ON \
+      -DCMAKE_BUILD_TYPE=Release \
+      -G Ninja \
       -DCMAKE_INSTALL_PREFIX="${LLAMA_CPP_BUILD_DIR}" \
+      $cuda_arch_flags \
       2>&1 | tee -a "${LOG_DIR}/llama_build.log" || {
       log "✗ CMake configuration failed"
       return 1
     }
   fi
 
-  # Build only llama-server target with progress output
-  # Use tee to capture output and keep connection alive
-  log "Starting compilation (watch ${LOG_DIR}/llama_build.log for details)..."
-  
+  # Build with Ninja (faster than make)
+  log "Starting compilation with Ninja (watch ${LOG_DIR}/llama_build.log for details)..."
+
   local build_start
   build_start=$(date +%s)
-  
+
   cmake --build "${LLAMA_CPP_BUILD_DIR}" \
     --config Release \
     --target llama-server \
-    -j"$(nproc)" \
     2>&1 | tee -a "${LOG_DIR}/llama_build.log" || {
     log "✗ Build failed"
     return 1
@@ -664,16 +725,15 @@ _build_llama_cpp_from_source() {
     return 1
   fi
 
-  # Optional: Clean build directory to save space
-  # Keep only the binary, remove object files
-  if [[ -d "${LLAMA_CPP_BUILD_DIR}/CMakeFiles" ]]; then
+  # Clean build artifacts
+  if [[ -d "${LLAMA_CPP_BUILD_DIR}/.ninja_deps" ]]; then
     log "Cleaning build artifacts to save space..."
-    find "${LLAMA_CPP_BUILD_DIR}" -name "*.o" -delete 2>/dev/null || true
+    rm -rf "${LLAMA_CPP_BUILD_DIR}/.ninja_deps" 2>/dev/null || true
     rm -rf "${LLAMA_CPP_BUILD_DIR}/CMakeFiles" 2>/dev/null || true
-    rm -f "${LLAMA_CPP_BUILD_DIR}/CMakeCache.txt" 2>/dev/null || true
+    rm -f "${LLAMA_CPP_BUILD_DIR}/build.ninja" 2>/dev/null || true
   fi
 
-  log "✓ llama-server built successfully"
+  log "✓ llama-server built successfully with TurboQuant CUDA"
   return 0
 }
 
@@ -873,10 +933,16 @@ start_llama_server() {
   local label="$2"
   local port="$3"
   local model_path="$4"
-  # ctx_size aus stacks.yaml lesen wenn nicht angegeben
+  # ctx_size aus Parameter oder Stack-spezifischem Default
   local ctx_size="${5:-}"
   if [[ -z "$ctx_size" ]]; then
-    ctx_size=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack_key}', {}).get('ctx_size', 8192))" 2>/dev/null || echo "8192")
+    # Stack-spezifische Defaults (für Remote-Ausführung ohne stacks.yaml)
+    case "$stack_key" in
+      text)             ctx_size=8192 ;;
+      text_pro)         ctx_size=262144 ;;
+      qwen_coder_ablit) ctx_size=262144 ;;
+      *)                ctx_size=8192 ;;
+    esac
   fi
   model_path="$(ensure_merged_model_path "${model_path}")"
 
@@ -888,13 +954,23 @@ start_llama_server() {
     return 0
   fi
 
-  log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size})..."
+  # TurboQuant-Parameter für qwen_coder_ablit
+  local turbo_args=""
+  if [[ "$stack_key" == "qwen_coder_ablit" ]]; then
+    # Optimierte Parameter für RTX A6000 (48GB VRAM)
+    turbo_args="-ctk turbo3 -ctv turbo3 -fa on -b 256"
+    log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size}, TurboQuant: turbo3, batch: 256)..."
+  else
+    log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size})..."
+  fi
+  
   nohup stdbuf -oL -eL "${LLAMA_SERVER_BIN}" \
     -m "${model_path}" \
     --host "${BIND_ADDR}" \
     --port "${port}" \
     -c "${ctx_size}" \
     -ngl 999 \
+    $turbo_args \
     >"${LOG_DIR}/${stack_key}.log" 2>&1 &
   disown
   wait_for_port "${BIND_ADDR}" "${port}" 60 2
@@ -906,6 +982,15 @@ write_onstart_llama_server() {
   local port="$3"
   local model_path="$4"
   local ctx_size="${5:-8192}"
+  
+  # TurboQuant-Parameter für qwen_coder_ablit
+  local use_turboquant="false"
+  local turbo_layers="3"
+  if [[ "$stack_key" == "qwen_coder_ablit" ]]; then
+    use_turboquant="true"
+    turbo_layers="3"
+  fi
+  
   cat > "${ONSTART}" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -915,6 +1000,8 @@ LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN}"
 MODEL_PATH="${model_path}"
 PORT="${port}"
 CTX_SIZE="${ctx_size}"
+USE_TURBOQUANT="${use_turboquant}"
+TURBO_LAYERS="${turbo_layers}"
 
 log() { echo "[\$(date '+%H:%M:%S')] \$*"; }
 ensure_model_path() {
@@ -953,13 +1040,17 @@ ensure_model_path
 
 if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
   log "Starting llama-server on \${BIND_ADDR}:\${PORT}..."
-  nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \
-    -m "\${MODEL_PATH}" \
-    --host "\${BIND_ADDR}" \
-    --port "\${PORT}" \
-    -c "\${CTX_SIZE}" \
-    -ngl 999 \
-    >"\${LOG_DIR}/${stack_key}.log" 2>&1 &
+  
+  # Basis-Argumente
+  LLAMA_ARGS="-m \"\${MODEL_PATH}\" --host \"\${BIND_ADDR}\" --port \"\${PORT}\" -c \"\${CTX_SIZE}\" -ngl 999"
+  
+  # TurboQuant-Argumente für massive VRAM-Ersparnis
+  if [[ "\${USE_TURBOQUANT}" == "true" ]]; then
+    log "Using TurboQuant KV-Cache (turbo\${TURBO_LAYERS}) for reduced VRAM usage"
+    LLAMA_ARGS="\${LLAMA_ARGS} -ctk turbo\${TURBO_LAYERS} -ctv turbo\${TURBO_LAYERS} -fa on -b 512"
+  fi
+  
+  nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \${LLAMA_ARGS} >"\${LOG_DIR}/${stack_key}.log" 2>&1 &
   disown
 fi
 
@@ -1067,10 +1158,101 @@ write_onstart_text_pro() {
 
 write_onstart_qwen_coder_ablit() {
   local model_path="$1"
-  # ctx_size aus stacks.yaml lesen, Fallback auf 32768
-  local ctx_size
-  ctx_size=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('qwen_coder_ablit', {}).get('ctx_size', 32768))" 2>/dev/null || echo "32768")
-  write_onstart_llama_server "qwen_coder_ablit" "QWEN_CODER_ABLIT llama.cpp" "${SERVICE_PORT}" "${model_path}" "${ctx_size}"
+  # Optimierte Parameter für RTX A6000 (48GB VRAM)
+  # Reduzierte Batch-Größe und Context für bessere VRAM-Nutzung
+  local ctx_size="${2:-131072}"  # 131K statt 262K für 48GB VRAM
+  
+  cat > "${ONSTART}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+LOG_DIR="/var/log/stack"
+BIND_ADDR="127.0.0.1"
+LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN}"
+MODEL_PATH="${model_path}"
+PORT="${SERVICE_PORT}"
+CTX_SIZE="${ctx_size}"
+
+log() { echo "[\$(date '+%H:%M:%S')] \$*"; }
+ensure_model_path() {
+  if [[ "\$MODEL_PATH" =~ ^(.+)\.part([0-9]+)of([0-9]+)$ ]]; then
+    local merged_path="\${BASH_REMATCH[1]}"
+    local total_parts="\${BASH_REMATCH[3]}"
+    local idx part_path
+    if [[ -f "\${merged_path}" ]]; then
+      MODEL_PATH="\${merged_path}"
+      return 0
+    fi
+    log "Combining \${total_parts} model parts into \${merged_path}..."
+    part_path="\${merged_path}.part1of\${total_parts}"
+    if [[ ! -f "\${part_path}" ]]; then
+      log "Missing model part: \${part_path}"
+      return 1
+    fi
+    mv "\${part_path}" "\${merged_path}"
+    for idx in \$(seq 2 "\${total_parts}"); do
+      part_path="\${merged_path}.part\${idx}of\${total_parts}"
+      if [[ ! -f "\${part_path}" ]]; then
+        log "Missing model part: \${part_path}"
+        return 1
+      fi
+      log "Merge \${idx}/\${total_parts}: \${part_path}"
+      cat "\${part_path}" >> "\${merged_path}"
+      rm -f "\${part_path}" >/dev/null 2>&1 || true
+    done
+    MODEL_PATH="\${merged_path}"
+  fi
+}
+
+mkdir -p "\${LOG_DIR}"
+log "=== Starting QWEN_CODER_ABLIT llama.cpp ==="
+ensure_model_path
+
+if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
+  log "Starting llama-server on \${BIND_ADDR}:\${PORT}..."
+  log "Using TurboQuant KV-Cache (turbo3) for reduced VRAM usage"
+  log "Optimized for RTX A6000 (48GB VRAM): -b 256 -c \${CTX_SIZE}"
+  
+  # Optimierte Parameter für 48GB VRAM:
+  # -b 256 statt 512 (reduzierter Batch für weniger VRAM)
+  # -ctk turbo3 -ctv turbo3 (TurboQuant KV-Cache)
+  # -fa on (flash attention)
+  nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \
+    -m "\${MODEL_PATH}" \
+    --host "\${BIND_ADDR}" \
+    --port "\${PORT}" \
+    -c "\${CTX_SIZE}" \
+    -ngl 999 \
+    -ctk turbo3 \
+    -ctv turbo3 \
+    -fa on \
+    -b 256 \
+    >"\${LOG_DIR}/qwen_coder_ablit.log" 2>&1 &
+  disown
+fi
+
+ready=0
+for i in \$(seq 1 60); do
+  if curl -sf "http://\${BIND_ADDR}:\${PORT}" >/dev/null 2>&1 || \
+     curl -sf "http://\${BIND_ADDR}:\${PORT}/health" >/dev/null 2>&1 || \
+     curl -sf "http://\${BIND_ADDR}:\${PORT}/v1/models" >/dev/null 2>&1; then
+    log "QWEN_CODER_ABLIT ready on port \${PORT}"
+    ready=1
+    break
+  fi
+  if (( i == 1 || i % 10 == 0 )); then
+    log "QWEN_CODER_ABLIT noch nicht bereit (\${i}s). Log: \${LOG_DIR}/qwen_coder_ablit.log"
+  fi
+  sleep 1
+done
+
+if (( ready == 1 )); then
+  log "QWEN_CODER_ABLIT started."
+else
+  log "QWEN_CODER_ABLIT noch im Start. Pruefe \${LOG_DIR}/qwen_coder_ablit.log"
+fi
+EOF
+  chmod +x "${ONSTART}"
+  log "Created ${ONSTART} for qwen_coder_ablit stack (optimized for 48GB VRAM)."
 }
 
 install_open_webui() {
@@ -3299,10 +3481,10 @@ case "${STACK_TYPE}" in
     install_llama_cpp
     install_hf_hub
     qwen_coder_model_path="$(resolve_gguf_model_path "${STACK_MODEL}" "${STACK_MODEL_FILE_HINT}" "qwen_coder_ablit")"
-    write_onstart_qwen_coder_ablit "${qwen_coder_model_path}"
-    start_llama_server "qwen_coder_ablit" "QWEN_CODER_ABLIT llama.cpp" "${SERVICE_PORT}" "${qwen_coder_model_path}"
+    write_onstart_qwen_coder_ablit "${qwen_coder_model_path}" 262144
+    start_llama_server "qwen_coder_ablit" "QWEN_CODER_ABLIT llama.cpp" "${SERVICE_PORT}" "${qwen_coder_model_path}" 262144
     write_manifest "qwen_coder_ablit" "${STACK_TEMPLATE}" "${SERVICE_PORT}"
-    log "QWEN_CODER_ABLIT llama.cpp stack ready on port ${SERVICE_PORT} with configured context size"
+    log "QWEN_CODER_ABLIT llama.cpp stack ready on port ${SERVICE_PORT} with 262,144 token context (TurboQuant turbo3)"
     ;;
   image)
     STACK_MODEL="${STACK_MODEL:-$IMAGE_DEFAULT_MODEL}"

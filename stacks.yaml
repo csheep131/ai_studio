@@ -175,7 +175,8 @@ stacks:
     max_dph: 4.5
     min_vram_mb: 49152
     gpu_regex: RTX.*5090|RTX.*6000|B200|H200|H100|A100|A800|L40S|L40|A6000|A5000
-    ctx_size: 131072
+    ctx_size: 262144
+    turboquant: true
   comfyui:
     label: "ComfyUI Pro Workflows (Flux + SDXL + Custom Nodes)"
     service_port: 7867
