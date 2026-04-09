@@ -1,0 +1,62 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ai_studio
+  title: Ai Studio
+  description: |
+    Lokale Steuerung für mehrere GPU-Stacks auf Vast.ai.
+  tags:
+    - gpu
+    - ai
+    - vastai
+    - python
+  annotations:
+    backstage.io/source-location: url:file:///home/schaf/projects/ai_studio
+    backstage.io/techdocs-ref: dir:.
+spec:
+  type: service
+  lifecycle: production
+  owner: user:default/schaf
+  system: arx-services
+
+---
+
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: ai_studio-api
+  title: Ai Studio API
+  description: API für ai studio
+spec:
+  type: openapi
+  lifecycle: production
+  owner: user:default/schaf
+  system: arx-services
+  definition:
+    |
+    openapi: 3.0.0
+    info:
+      title: Ai Studio API
+      version: "1.0.0"
+      description: Lokale Steuerung für mehrere GPU-Stacks auf Vast.ai.
+    
+    servers:
+      - url: http://localhost:None
+        description: Local development server
+    
+    paths:
+      /health:
+        get:
+          summary: Health check
+          operationId: healthCheck
+          responses:
+            '200':
+              description: Service is healthy
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        example: healthy

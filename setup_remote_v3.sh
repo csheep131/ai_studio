@@ -18,11 +18,21 @@ STACK_MODEL="${STACK_MODEL:-}"
 STACK_MODEL_FILE_HINT="${STACK_MODEL_FILE_HINT:-}"
 STACK_TEMPLATE="${STACK_TEMPLATE:-}"
 SERVICE_PORT="${SERVICE_PORT:-}"
-PULL_MODEL="${PULL_MODEL:-1}"
+# Normalize PULL_MODEL to 0/1
+case "${PULL_MODEL:-1}" in
+  1|true|yes) PULL_MODEL=1 ;;
+  *)          PULL_MODEL=0 ;;
+esac
 HF_TOKEN="${HF_TOKEN:-${HUGGINGFACE_HUB_TOKEN:-}}"
 FORCE_MODEL_REINSTALL="${FORCE_MODEL_REINSTALL:-0}"
 IMAGE_APP_SOURCE="${IMAGE_APP_SOURCE:-}"
 IMAGE_LORAS_JSON="${IMAGE_LORAS_JSON:-[]}"
+
+# Validate STACK_TYPE early
+case "${STACK_TYPE}" in
+  text|text_pro|image|image_prompt|video|video_lora|video_i2v|comfyui|qwen_coder_ablit|qwen_opus) ;;
+  *) echo "✗ Unknown STACK_TYPE: '${STACK_TYPE}'" >&2; exit 1 ;;
+esac
 if [[ -n "${HF_TOKEN}" ]]; then
   # huggingface_hub honors HF_TOKEN; keep both names for compatibility.
   export HF_TOKEN
@@ -36,11 +46,29 @@ ONSTART="/onstart.sh"
 WEBUI_PORT="${WEBUI_PORT:-8080}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 TEXT_PORT="${TEXT_PORT:-8080}"
+TEXT_PRO_PORT="${TEXT_PRO_PORT:-8081}"
 IMAGE_PORT="${IMAGE_PORT:-7860}"
 VIDEO_PORT="${VIDEO_PORT:-7861}"
 VIDEO_LORA_PORT="${VIDEO_LORA_PORT:-7862}"
-TEXT_PRO_PORT="${TEXT_PRO_PORT:-8081}"
+IMAGE_PROMPT_PORT="${IMAGE_PROMPT_PORT:-7863}"
+QWEN_CODER_ABLIT_PORT="${QWEN_CODER_ABLIT_PORT:-8082}"
+QWEN_OPUS_PORT="${QWEN_OPUS_PORT:-8083}"
 COMFYUI_PORT="${COMFYUI_PORT:-7867}"
+
+# SERVICE_PORT-Override hat Priorität, danach stack-spezifischer Default
+if [[ -z "${SERVICE_PORT}" ]]; then
+  case "${STACK_TYPE}" in
+    text)             SERVICE_PORT="${TEXT_PORT}" ;;
+    text_pro)         SERVICE_PORT="${TEXT_PRO_PORT}" ;;
+    image)            SERVICE_PORT="${IMAGE_PORT}" ;;
+    image_prompt)     SERVICE_PORT="${IMAGE_PROMPT_PORT}" ;;
+    video|video_i2v)  SERVICE_PORT="${VIDEO_PORT}" ;;
+    video_lora)       SERVICE_PORT="${VIDEO_LORA_PORT}" ;;
+    qwen_coder_ablit) SERVICE_PORT="${QWEN_CODER_ABLIT_PORT}" ;;
+    qwen_opus)        SERVICE_PORT="${QWEN_OPUS_PORT}" ;;
+    comfyui)          SERVICE_PORT="${COMFYUI_PORT}" ;;
+  esac
+fi
 
 TEXT_DEFAULT_MODEL="cesarsal1nas/Huihui-Qwen3.5-35B-A3B-abliterated-Q4_K_M-GGUF"
 TEXT_PRO_DEFAULT_MODEL="lmstudio-community/Llama-4-Scout-17B-16E-Instruct-GGUF"
@@ -410,17 +438,25 @@ install_deps_common() {
 
 wait_for_port() {
   local host="$1" port="$2" max="${3:-30}" secs="${4:-2}"
-  log "Waiting for ${host}:${port}..."
+  log "Waiting for ${host}:${port} (max $((max * secs))s)..."
+  local i
   for i in $(seq 1 "${max}"); do
-    if curl -sf "http://${host}:${port}" &>/dev/null 2>&1 \
-        || curl -sf "http://${host}:${port}/api/tags" &>/dev/null 2>&1 \
-        || curl -sf "http://${host}:${port}/v1/models" &>/dev/null 2>&1 \
-        || curl -sf "http://${host}:${port}/health" &>/dev/null 2>&1; then
-      log "${host}:${port} ready."; return 0
+    if curl -sf --connect-timeout 3 --max-time 5 "http://${host}:${port}" &>/dev/null 2>&1 \
+        || curl -sf --connect-timeout 3 --max-time 5 "http://${host}:${port}/api/tags" &>/dev/null 2>&1 \
+        || curl -sf --connect-timeout 3 --max-time 5 "http://${host}:${port}/v1/models" &>/dev/null 2>&1 \
+        || curl -sf --connect-timeout 3 --max-time 5 "http://${host}:${port}/health" &>/dev/null 2>&1; then
+      log "${host}:${port} ready after $((i * secs))s."; echo; return 0
     fi
-    printf '.'; sleep "${secs}"
+    if (( i == 1 || i % 10 == 0 )); then
+      printf '\n'; log "Still waiting (${i}/${max} attempts)..."
+    else
+      printf '.'
+    fi
+    sleep "${secs}"
   done
-  echo; log "WARNING: ${host}:${port} not responding – continuing."
+  echo
+  log "WARNING: ${host}:${port} not responding after $((max * secs))s – service may still be starting."
+  return 1
 }
 
 ensure_merged_model_path() {
@@ -958,15 +994,17 @@ start_llama_server() {
   # TurboQuant-Parameter für qwen_coder_ablit und qwen_opus
   local turbo_args=""
   local turbo_env=""
+  local rope_args=""
   if [[ "$stack_key" == "qwen_coder_ablit" || "$stack_key" == "qwen_opus" ]]; then
     # Optimierte Parameter mit TURBO_LAYER_ADAPTIVE für maximalen Context (262K)
     turbo_args="-ctk turbo3 -ctv turbo3 -fa on -b 512"
     turbo_env="TURBO_LAYER_ADAPTIVE=1"
+    rope_args="--rope-freq-base 1000000 --rope-freq-scale 1"
     log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size}, TurboQuant: turbo3, TURBO_LAYER_ADAPTIVE=1, batch: 512)..."
   else
     log "Starting ${label} on ${BIND_ADDR}:${port} (context: ${ctx_size})..."
   fi
-  
+
   nohup stdbuf -oL -eL env ${turbo_env} "${LLAMA_SERVER_BIN}" \
     -m "${model_path}" \
     --host "${BIND_ADDR}" \
@@ -974,6 +1012,7 @@ start_llama_server() {
     -c "${ctx_size}" \
     -ngl 999 \
     $turbo_args \
+    $rope_args \
     >"${LOG_DIR}/${stack_key}.log" 2>&1 &
   disown
   wait_for_port "${BIND_ADDR}" "${port}" 60 2
@@ -1043,22 +1082,22 @@ ensure_model_path
 
 if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
   log "Starting llama-server on \${BIND_ADDR}:\${PORT}..."
-  
-  # Basis-Argumente
-  LLAMA_ARGS="-m \"\${MODEL_PATH}\" --host \"\${BIND_ADDR}\" --port \"\${PORT}\" -c \"\${CTX_SIZE}\" -ngl 999"
-  
+
+  # Argumente als Array – sicher bei Pfaden mit Leerzeichen
+  LLAMA_ARGS=(-m "\${MODEL_PATH}" --host "\${BIND_ADDR}" --port "\${PORT}" -c "\${CTX_SIZE}" -ngl 999)
+
   # TurboQuant-Argumente für massive VRAM-Ersparnis
   if [[ "\${USE_TURBOQUANT}" == "true" ]]; then
     log "Using TurboQuant KV-Cache (turbo\${TURBO_LAYERS}) for reduced VRAM usage"
-    LLAMA_ARGS="\${LLAMA_ARGS} -ctk turbo\${TURBO_LAYERS} -ctv turbo\${TURBO_LAYERS} -fa on -b 512"
+    LLAMA_ARGS+=(-ctk "turbo\${TURBO_LAYERS}" -ctv "turbo\${TURBO_LAYERS}" -fa on -b 512)
   fi
-  
-  nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \${LLAMA_ARGS} >"\${LOG_DIR}/${stack_key}.log" 2>&1 &
+
+  nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" "\${LLAMA_ARGS[@]}" >"\${LOG_DIR}/${stack_key}.log" 2>&1 &
   disown
 fi
 
 ready=0
-for i in \$(seq 1 60); do
+for i in \$(seq 1 300); do
   if curl -sf "http://\${BIND_ADDR}:\${PORT}" >/dev/null 2>&1 || \
      curl -sf "http://\${BIND_ADDR}:\${PORT}/health" >/dev/null 2>&1 || \
      curl -sf "http://\${BIND_ADDR}:\${PORT}/v1/models" >/dev/null 2>&1; then
@@ -1066,7 +1105,7 @@ for i in \$(seq 1 60); do
     ready=1
     break
   fi
-  if (( i == 1 || i % 10 == 0 )); then
+  if (( i == 1 || i % 30 == 0 )); then
     log "${label} noch nicht bereit (\${i}s). Log: \${LOG_DIR}/${stack_key}.log"
   fi
   sleep 1
@@ -1075,7 +1114,7 @@ done
 if (( ready == 1 )); then
   log "${label} started."
 else
-  log "${label} noch im Start. Pruefe ${LOG_DIR}/${stack_key}.log"
+  log "${label} noch im Start (>300s). Pruefe \${LOG_DIR}/${stack_key}.log"
 fi
 EOF
   chmod +x "${ONSTART}"
@@ -1234,7 +1273,7 @@ if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
 fi
 
 ready=0
-for i in \$(seq 1 60); do
+for i in \$(seq 1 300); do
   if curl -sf "http://\${BIND_ADDR}:\${PORT}" >/dev/null 2>&1 || \
      curl -sf "http://\${BIND_ADDR}:\${PORT}/health" >/dev/null 2>&1 || \
      curl -sf "http://\${BIND_ADDR}:\${PORT}/v1/models" >/dev/null 2>&1; then
@@ -1242,7 +1281,7 @@ for i in \$(seq 1 60); do
     ready=1
     break
   fi
-  if (( i == 1 || i % 10 == 0 )); then
+  if (( i == 1 || i % 30 == 0 )); then
     log "QWEN_CODER_ABLIT noch nicht bereit (\${i}s). Log: \${LOG_DIR}/qwen_coder_ablit.log"
   fi
   sleep 1
@@ -1251,7 +1290,7 @@ done
 if (( ready == 1 )); then
   log "QWEN_CODER_ABLIT started."
 else
-  log "QWEN_CODER_ABLIT noch im Start. Pruefe \${LOG_DIR}/qwen_coder_ablit.log"
+  log "QWEN_CODER_ABLIT noch im Start (>300s). Pruefe \${LOG_DIR}/qwen_coder_ablit.log"
 fi
 EOF
   chmod +x "${ONSTART}"
@@ -1318,6 +1357,7 @@ if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
   # -b 512 (volle Batch-Größe)
   # -ctk turbo3 -ctv turbo3 (TurboQuant KV-Cache)
   # -fa on (flash attention)
+  # --rope-freq-base 1000000 --rope-freq-scale 1 (optimierte Rope-Parameter für lange Context)
   TURBO_LAYER_ADAPTIVE=1 nohup stdbuf -oL -eL "\${LLAMA_SERVER_BIN}" \
     -m "\${MODEL_PATH}" \
     --host "\${BIND_ADDR}" \
@@ -1328,12 +1368,14 @@ if ! pgrep -af "llama-server.*--port \${PORT}" >/dev/null 2>&1; then
     -ctv turbo3 \
     -fa on \
     -b 512 \
+    --rope-freq-base 1000000 \
+    --rope-freq-scale 1 \
     >"\${LOG_DIR}/qwen_opus.log" 2>&1 &
   disown
 fi
 
 ready=0
-for i in \$(seq 1 60); do
+for i in \$(seq 1 300); do
   if curl -sf "http://\${BIND_ADDR}:\${PORT}" >/dev/null 2>&1 || \
      curl -sf "http://\${BIND_ADDR}:\${PORT}/health" >/dev/null 2>&1 || \
      curl -sf "http://\${BIND_ADDR}:\${PORT}/v1/models" >/dev/null 2>&1; then
@@ -1341,7 +1383,7 @@ for i in \$(seq 1 60); do
     ready=1
     break
   fi
-  if (( i == 1 || i % 10 == 0 )); then
+  if (( i == 1 || i % 30 == 0 )); then
     log "QWEN_OPUS noch nicht bereit (\${i}s). Log: \${LOG_DIR}/qwen_opus.log"
   fi
   sleep 1
@@ -1350,7 +1392,7 @@ done
 if (( ready == 1 )); then
   log "QWEN_OPUS started."
 else
-  log "QWEN_OPUS noch im Start. Pruefe \${LOG_DIR}/qwen_opus.log"
+  log "QWEN_OPUS noch im Start (>300s). Pruefe \${LOG_DIR}/qwen_opus.log"
 fi
 EOF
   chmod +x "${ONSTART}"
@@ -2211,7 +2253,7 @@ start_comfyui_ui() {
       --disable-auto-launch \
       >"${LOG_DIR}/comfyui.log" 2>&1 &
   disown
-  wait_for_port "${BIND_ADDR}" "${COMFYUI_PORT}" 60 5
+  wait_for_port "${BIND_ADDR}" "${COMFYUI_PORT}" 120 5
 }
 
 write_start_comfyui_script() {
@@ -2246,13 +2288,13 @@ if ! pgrep -f "main.py.*--listen" &>/dev/null; then
 fi
 
 ready=0
-for i in $(seq 1 60); do
+for i in $(seq 1 600); do
   if curl -sf "http://${BIND_ADDR}:${COMFYUI_PORT}" >/dev/null 2>&1; then
     log "ComfyUI ready on port ${COMFYUI_PORT}"
     ready=1
     break
   fi
-  if (( i == 1 || i % 10 == 0 )); then
+  if (( i == 1 || i % 60 == 0 )); then
     log "ComfyUI noch nicht bereit (${i}s). Log: ${LOG_DIR}/comfyui.log"
   fi
   sleep 1
@@ -2261,7 +2303,7 @@ done
 if (( ready == 1 )); then
   log "ComfyUI started."
 else
-  log "ComfyUI noch im Start. Pruefe ${LOG_DIR}/comfyui.log"
+  log "ComfyUI noch im Start (>600s). Pruefe ${LOG_DIR}/comfyui.log"
 fi
 ONSTART
   chmod +x "${COMFYUI_DIR}/start_comfyui.sh"
@@ -3589,7 +3631,7 @@ case "${STACK_TYPE}" in
     log "QWEN_CODER_ABLIT llama.cpp stack ready on port ${SERVICE_PORT} with 262,144 token context (TurboQuant turbo3)"
     ;;
   qwen_opus)
-    STACK_MODEL="${STACK_MODEL:-LuffyTheFox/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-GGUF}"
+    STACK_MODEL="${STACK_MODEL:-mradermacher/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated-GGUF}"
     STACK_TEMPLATE="${STACK_TEMPLATE:-nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04}"
     SERVICE_PORT="${SERVICE_PORT:-8083}"
     install_llama_cpp

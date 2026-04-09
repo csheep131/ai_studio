@@ -193,10 +193,10 @@ stacks:
     required_commands:
     - llama-server
     - python3
-    default_model: LuffyTheFox/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-GGUF
-    model_file_hint: "Qwen3.5-27B-Uncensored-KL.Q4_K_M.gguf"
+    default_model: mradermacher/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated-GGUF
+    model_file_hint: "Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated.Q4_K_M.gguf"
     max_dph: 3.5
-    disk_gb: 80
+    disk_gb: 120
     min_vram_mb: 49152
     gpu_regex: RTX.*5090|RTX.*6000|RTX.*4090|B200|H200|H100|A100|A800|L40S|L40|A6000|A5000
     ctx_size: 262144
@@ -271,5 +271,5 @@ presets:
   opus_chat:
     description: Qwen3.5-27B Claude-4.6-Opus Uncensored Chat
     stack: qwen_opus
-    model: LuffyTheFox/Qwen3.5-27B-Claude-4.6-Opus-Uncensored-V2-Kullback-Leibler-GGUF
+    model: mradermacher/Huihui-Qwen3.5-27B-Claude-4.6-Opus-abliterated-GGUF
     notes: "Kostengünstig auf RTX 5090/6000/4090 mit TurboQuant, 262K Context"

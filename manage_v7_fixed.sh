@@ -304,7 +304,7 @@ PY
     fi
   fi
 
-  # 2. Optional: echter SSH-Handshake/Login-Test
+  # 2. Echter SSH-Handshake/Login-Test (Auth muss klappen)
   if ssh -o BatchMode=yes \
          -o StrictHostKeyChecking=no \
          -o UserKnownHostsFile=/dev/null \
@@ -314,8 +314,8 @@ PY
     print_ok "SSH-Login erfolgreich."
     return 0
   else
-    print_warn "SSH-Port erreichbar, aber Login/Auth noch nicht erfolgreich."
-    return 0
+    print_warn "SSH-Port erreichbar, aber Login/Auth noch nicht erfolgreich. Warte..."
+    return 1
   fi
 }
 
@@ -338,7 +338,7 @@ wait_for_ssh() {
 remote_log_file_for_stack() {
   local stack="$1"
   case "$stack" in
-    text|text_pro|qwen_coder_ablit)
+    text|text_pro|qwen_coder_ablit|qwen_opus)
       echo "/var/log/stack/${stack}.log"
       ;;
     image)
@@ -466,19 +466,26 @@ ensure_stack_setup() {
   stack_loras_json=$(python3 -c "import json,yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(json.dumps(c.get('stacks', {}).get('${stack}', {}).get('loras', [])))")
   stack_loras_json_quoted=$(python3 -c "import shlex,sys; print(shlex.quote(sys.argv[1]))" "${stack_loras_json}")
 
+  # SCP-Optionen: StrictHostKeyChecking=no wegen wechselnder Instanzen, ServerAlive verhindert Hängen
+  local _scp_opts=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=3)
+
   print_info "Lade ${REMOTE_SETUP} hoch..."
-  if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
-    "${REMOTE_SETUP}" root@"${INSTANCE_IP}":~/setup_remote.sh; then
-    print_err "Upload fehlgeschlagen."
+  local upload_rc=0
+  scp "${_scp_opts[@]}" -P "${INSTANCE_PORT}" \
+    "${REMOTE_SETUP}" root@"${INSTANCE_IP}":~/setup_remote.sh || upload_rc=$?
+  if (( upload_rc != 0 )); then
+    print_err "Upload fehlgeschlagen (rc=${upload_rc})."
     return 1
   fi
   # Upload hf_safe_download.py for safe HuggingFace downloads
   local hf_safe_download="${SCRIPT_DIR}/hf_safe_download.py"
   if [[ -f "${hf_safe_download}" ]]; then
     print_info "Lade hf_safe_download.py hoch..."
-    if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
-      "${hf_safe_download}" root@"${INSTANCE_IP}":~/hf_safe_download.py; then
-      print_err "Upload von hf_safe_download.py fehlgeschlagen."
+    upload_rc=0
+    scp "${_scp_opts[@]}" -P "${INSTANCE_PORT}" \
+      "${hf_safe_download}" root@"${INSTANCE_IP}":~/hf_safe_download.py || upload_rc=$?
+    if (( upload_rc != 0 )); then
+      print_err "Upload von hf_safe_download.py fehlgeschlagen (rc=${upload_rc})."
       return 1
     fi
   else
@@ -487,9 +494,11 @@ ensure_stack_setup() {
   fi
   if [[ "$stack" == "image" && -f "${IMAGE_APP_SOURCE}" ]]; then
     print_info "Lade ${IMAGE_APP_SOURCE##*/} hoch..."
-    if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
-      "${IMAGE_APP_SOURCE}" root@"${INSTANCE_IP}":~/image_app.py; then
-      print_err "Upload der Image-App fehlgeschlagen."
+    upload_rc=0
+    scp "${_scp_opts[@]}" -P "${INSTANCE_PORT}" \
+      "${IMAGE_APP_SOURCE}" root@"${INSTANCE_IP}":~/image_app.py || upload_rc=$?
+    if (( upload_rc != 0 )); then
+      print_err "Upload der Image-App fehlgeschlagen (rc=${upload_rc})."
       return 1
     fi
     remote_image_app="/root/image_app.py"
@@ -498,8 +507,10 @@ ensure_stack_setup() {
     local image_prompt_app="${SCRIPT_DIR}/generative-ui/app_prompt.py"
     if [[ -f "${image_prompt_app}" ]]; then
       print_info "Lade app_prompt.py hoch..."
-      if ! scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -P "${INSTANCE_PORT}" \
-        "${image_prompt_app}" root@"${INSTANCE_IP}":~/image_prompt_app.py; then
+      upload_rc=0
+      scp "${_scp_opts[@]}" -P "${INSTANCE_PORT}" \
+        "${image_prompt_app}" root@"${INSTANCE_IP}":~/image_prompt_app.py || upload_rc=$?
+      if (( upload_rc != 0 )); then
         print_err "Upload der Image-Prompt-App fehlgeschlagen."
         return 1
       fi
@@ -511,12 +522,22 @@ ensure_stack_setup() {
   
   print_info "Führe remote setup aus (Model: ${stack_model:-default})..."
   local setup_rc=0
-  print_info "Live-Log vom Remote-Setup:"
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=30 \
+  print_info "Live-Log vom Remote-Setup (Timeout: 2h):"
+  # Timeout 7200s (2h) für große Modell-Downloads; ServerAliveInterval verhindert hängende Sessions
+  timeout 7200 ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=20 \
+    -o ServerAliveInterval=60 \
+    -o ServerAliveCountMax=5 \
     -p "${INSTANCE_PORT}" root@"${INSTANCE_IP}" \
     "chmod +x ~/setup_remote.sh && STACK_TYPE='${stack}' STACK_MODEL='${stack_model}' STACK_MODEL_FILE_HINT='${stack_model_file_hint}' STACK_TEMPLATE='${stack_template}' SERVICE_PORT='${service_port}' PULL_MODEL=1 FORCE_MODEL_REINSTALL='${FORCE_MODEL_REINSTALL:-0}' HF_TOKEN='${hf_token}' IMAGE_APP_SOURCE='${remote_image_app}' IMAGE_LORAS_JSON=${stack_loras_json_quoted} bash ~/setup_remote.sh" || setup_rc=$?
+  if (( setup_rc == 124 )); then
+    print_err "Remote setup Timeout nach 2h. Zu langsam oder hängt."
+    return 1
+  fi
   if (( setup_rc != 0 )); then
-    print_err "Remote setup fehlgeschlagen."
+    print_err "Remote setup fehlgeschlagen (rc=${setup_rc})."
     return 1
   fi
   print_ok "Setup abgeschlossen."
@@ -529,7 +550,7 @@ ensure_stack_started() {
   local force_restart="${FORCE_STACK_RESTART:-0}"
   require_state "$stack"
   ensure_instance_running "$stack"
-  wait_for_ssh "$stack" 120 5
+  wait_for_ssh "$stack" 240 5
   
   # Hole Service-Port aus stacks.yaml
   local port
@@ -545,7 +566,9 @@ ensure_stack_started() {
 
   if [[ "${force_restart}" == "1" ]]; then
     print_warn "Erzwinge Neustart des Dienstes auf Port ${port}..."
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "${INSTANCE_PORT}" root@"${INSTANCE_IP}" \
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=15 -o ServerAliveInterval=30 \
+        -p "${INSTANCE_PORT}" root@"${INSTANCE_IP}" \
       "pids=\$(lsof -ti tcp:${port} 2>/dev/null || true); if [[ -n \"\$pids\" ]]; then kill \$pids >/dev/null 2>&1 || true; sleep 2; kill -9 \$pids >/dev/null 2>&1 || true; fi" \
       >/dev/null 2>&1 || true
   fi
@@ -554,28 +577,35 @@ ensure_stack_started() {
   print_info "Führe /onstart.sh aus..."
   start_remote_log_stream "$stack"
   log_tail_pid="${REMOTE_LOG_TAIL_PID:-}"
-  if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p "${INSTANCE_PORT}" root@"${INSTANCE_IP}" "bash /onstart.sh"; then
-    stop_remote_log_stream "$log_tail_pid"
+  # Sicherstellen dass Log-Stream immer beendet wird
+  trap 'stop_remote_log_stream "${log_tail_pid:-}"' RETURN
+  local onstart_rc=0
+  ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ConnectTimeout=15 \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -p "${INSTANCE_PORT}" root@"${INSTANCE_IP}" "bash /onstart.sh" || onstart_rc=$?
+  if (( onstart_rc != 0 )); then
     print_remote_log_snapshot "$stack"
-    print_warn "/onstart.sh konnte nicht ausgeführt werden."
-    return 1
+    print_warn "/onstart.sh fehlgeschlagen (rc=${onstart_rc}). Service läuft evtl. trotzdem."
+    # Kein hartes return 1 – Service könnte trotzdem im Hintergrund hochkommen
   fi
-  
-  # Warte auf Port
-  print_info "Warte auf Dienst (Port ${port})..."
-  local max=60 interval=3 i=0
+
+  # Warte auf Port (großzügig: 10min für große Modelle)
+  print_info "Warte auf Dienst (Port ${port}, max 10min)..."
+  local max=120 interval=5 i=0
   for ((i=0; i<max; i++)); do
     if python3 "${VAST_PY}" remote-port-open "$stack" "$port" --json 2>/dev/null | jq -e '.port_open == true' >/dev/null; then
-      stop_remote_log_stream "$log_tail_pid"
       print_ok "Dienst auf Port ${port} erreichbar."
       return 0
     fi
-    if (( i > 0 && i % 5 == 0 )); then
+    if (( i > 0 && i % 12 == 0 )); then
       print_info "Noch nicht bereit (${stack}, $((i*interval))s gewartet)..."
     fi
     sleep "$interval"
   done
-  stop_remote_log_stream "$log_tail_pid"
   print_remote_log_snapshot "$stack"
   print_err "Dienst nach $((max*interval))s nicht erreichbar."
   return 1

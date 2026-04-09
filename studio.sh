@@ -294,7 +294,8 @@ _refresh_stack_states_interactive() {
   local tmpfile tmpfile_json
   tmpfile=$(mktemp)
   tmpfile_json=$(mktemp)
-  
+  trap 'rm -f "${tmpfile}" "${tmpfile_json}"' RETURN
+
   # JSON in temporäre Datei schreiben
   echo "$instances_json" > "$tmpfile_json"
   
@@ -1418,13 +1419,16 @@ get_stack_port() {
   else
     # Fallback für bekannte Standardwerte
     case "$stack" in
-      text)     echo 8080 ;;
-      text_pro) echo 8081 ;;
-      image)    echo 7860 ;;
-      image_prompt) echo 7863 ;;
-      video)    echo 7861 ;;
-      video_lora) echo 7862 ;;
-      *)        echo 8080 ;;
+      text)             echo 8080 ;;
+      text_pro)         echo 8081 ;;
+      image)            echo 7860 ;;
+      image_prompt)     echo 7863 ;;
+      video)            echo 7861 ;;
+      video_lora)       echo 7862 ;;
+      qwen_coder_ablit) echo 8082 ;;
+      qwen_opus)        echo 8083 ;;
+      comfyui)          echo 7867 ;;
+      *)                echo 8080 ;;
     esac
   fi
 }
@@ -1706,15 +1710,18 @@ pick_local_port_for_stack() {
   preferred_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); print(s.get('local_port', s.get('service_port', '')))" 2>/dev/null || echo "")
   
   if [[ -z "$preferred_port" || ! "$preferred_port" =~ ^[0-9]+$ ]]; then
-    case "$stack" in 
-      text) preferred_port=8080 ;; 
-      text_pro) preferred_port=8081 ;; 
-      image) preferred_port=7860 ;; 
-      image_prompt) preferred_port=7863 ;;
-      video)  preferred_port=7861 ;; 
-      video_prompt) preferred_port=7861 ;; 
-      video_lora) preferred_port=7862 ;;
-      *) preferred_port=8080 ;;
+    case "$stack" in
+      text)             preferred_port=8080 ;;
+      text_pro)         preferred_port=8081 ;;
+      image)            preferred_port=7860 ;;
+      image_prompt)     preferred_port=7863 ;;
+      video)            preferred_port=7861 ;;
+      video_prompt)     preferred_port=7861 ;;
+      video_lora)       preferred_port=7862 ;;
+      qwen_coder_ablit) preferred_port=8082 ;;
+      qwen_opus)        preferred_port=8083 ;;
+      comfyui)          preferred_port=7867 ;;
+      *)                preferred_port=8080 ;;
     esac
   fi
 
@@ -1730,34 +1737,81 @@ open_tunnel_safely() {
   local stack="$1"
   local local_port service_port api_remote_port api_tunnel_port
 
-  # Hole Ports aus stacks.yaml
-  local_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack}', {}).get('local_port', c.get('stacks', {}).get('${stack}', {}).get('service_port', '')))")
-  service_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack}', {}).get('service_port', ''))")
-  api_remote_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_remote_port', s.get('ollama_remote_port')); print(v if v else '')")
-  api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')")
+  # Alle 4 Ports in einem einzigen Python-Aufruf lesen (kein 4x Startup-Overhead)
+  local _ports_csv
+  _ports_csv=$(python3 -c "
+import yaml
+c = yaml.safe_load(open('${STACKS_YAML}'))
+s = c.get('stacks', {}).get('${stack}', {})
+lp  = str(s.get('local_port', s.get('service_port', '')) or '')
+sp  = str(s.get('service_port', '') or '')
+arp = str(s.get('api_remote_port', s.get('ollama_remote_port', '')) or '')
+atp = str(s.get('api_tunnel_port', s.get('ollama_tunnel_port', '')) or '')
+print(lp + '|' + sp + '|' + arp + '|' + atp)
+" 2>/dev/null || echo "|||")
+  local_port="${_ports_csv%%|*}";      _ports_csv="${_ports_csv#*|}"
+  service_port="${_ports_csv%%|*}";    _ports_csv="${_ports_csv#*|}"
+  api_remote_port="${_ports_csv%%|*}"; api_tunnel_port="${_ports_csv#*|}"
+  # Sanitise "None" strings from Python
+  [[ "$local_port"      == "None" ]] && local_port=""
+  [[ "$service_port"    == "None" ]] && service_port=""
+  [[ "$api_remote_port" == "None" ]] && api_remote_port=""
+  [[ "$api_tunnel_port" == "None" ]] && api_tunnel_port=""
 
-  [[ "$local_port" != "8080" && "$local_port" != "8081" && "$local_port" != "7860" && "$local_port" != "7861" && "$local_port" != "7862"&& "$local_port" != "7863"  ]] && \
-    print_warn "Port $local_port statt Standard."
+  # Fallback wenn stacks.yaml-Lesen fehlgeschlagen
+  if [[ -z "$local_port" || "$local_port" == "None" ]]; then
+    local_port=$(get_stack_port "$stack")
+    service_port="$local_port"
+  fi
+
   print_step "Öffne Tunnel auf Port $local_port..."
   local sf="$(state_file_for "$stack")"
   source "$sf" >/dev/null 2>&1 || true
   [[ -z "${INSTANCE_IP:-}" || -z "${INSTANCE_PORT:-}" ]] && { print_err "Fehlende Instanzdaten."; return 1; }
 
-  # SSH-Tunnel im Hintergrund starten (mit -f Option)
+  # Bestehende Tunnel auf diesen Ports bereinigen
+  local _kill_ports=("$local_port")
+  [[ -n "$api_tunnel_port" ]] && _kill_ports+=("$api_tunnel_port")
+  for _p in "${_kill_ports[@]}"; do
+    local _pids
+    _pids=$(lsof -ti tcp:"${_p}" 2>/dev/null || true)
+    if [[ -n "$_pids" ]]; then
+      for _pid in $_pids; do
+        if ps -p "$_pid" -o comm= 2>/dev/null | grep -q "^ssh$"; then
+          kill "$_pid" 2>/dev/null || true
+        fi
+      done
+    fi
+  done
+  sleep 1
+
+  # SSH-Optionen für stabilen Tunnel
+  local _ssh_opts=(
+    -f -N
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ExitOnForwardFailure=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+    -o ConnectTimeout=15
+    -p "${INSTANCE_PORT}"
+  )
+
+  # SSH-Tunnel im Hintergrund starten
   if [[ -n "$api_remote_port" && -n "$api_tunnel_port" ]]; then
-    ssh -f -N \
+    ssh "${_ssh_opts[@]}" \
       -L "${local_port}:127.0.0.1:${service_port}" \
       -L "${api_tunnel_port}:127.0.0.1:${api_remote_port}" \
-      -p "${INSTANCE_PORT}" "root@${INSTANCE_IP}"
+      "root@${INSTANCE_IP}"
   else
-    ssh -f -N \
+    ssh "${_ssh_opts[@]}" \
       -L "${local_port}:127.0.0.1:${service_port}" \
-      -p "${INSTANCE_PORT}" "root@${INSTANCE_IP}"
+      "root@${INSTANCE_IP}"
   fi
-  
+
   # Kurze Wartezeit damit Tunnel aufgebaut wird
   sleep 2
-  
+
   # Prüfen ob Tunnel erfolgreich
   if command -v nc >/dev/null 2>&1; then
     if nc -z -w 2 127.0.0.1 "${local_port}" >/dev/null 2>&1; then
@@ -1773,7 +1827,7 @@ open_tunnel_safely() {
       return 0
     fi
   fi
-  
+
   print_warn "Tunnel wurde gestartet, aber Port ist nicht erreichbar (noch im Aufbau?)"
   return 0
 }
@@ -1802,12 +1856,24 @@ open_tunnel_for_stack() {
 
 close_tunnel_for_stack() {
   local stack="$1"
-  local local_port service_port api_tunnel_port
-  
-  # Hole Ports aus stacks.yaml
-  local_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); print(c.get('stacks', {}).get('${stack}', {}).get('local_port', c.get('stacks', {}).get('${stack}', {}).get('service_port', '')))")
-  api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')")
-  
+  local local_port api_tunnel_port
+
+  # Ports aus stacks.yaml (ein Python-Aufruf für beide Werte)
+  local _yaml_result
+  _yaml_result=$(python3 -c "
+import sys, yaml
+c = yaml.safe_load(open('${STACKS_YAML}'))
+s = c.get('stacks', {}).get('${stack}', {})
+lp = s.get('local_port', s.get('service_port', '')) or ''
+at = s.get('api_tunnel_port', s.get('ollama_tunnel_port', '')) or ''
+print(str(lp) + ':' + str(at))
+" 2>/dev/null || echo ":")
+  local_port="${_yaml_result%%:*}"
+  api_tunnel_port="${_yaml_result##*:}"
+  [[ "$local_port" == "None" || -z "$local_port" ]] && local_port=""
+  [[ "$api_tunnel_port" == "None" ]] && api_tunnel_port=""
+  [[ -z "$local_port" ]] && local_port=$(get_stack_port "$stack")
+
   print_step "Schließe SSH-Tunnel für $(get_stack_label $stack)..."
   
   # SSH-Prozesse finden und beenden die auf diesen Ports lauschen
@@ -1850,30 +1916,26 @@ close_tunnel_for_stack() {
 
 stack_local_url() {
   local stack="$1"
-  local local_port service_port api_tunnel_port
-  
-  local_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); print(s.get('local_port', s.get('service_port', '')))" 2>/dev/null || echo "")
-  service_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); print(s.get('service_port', ''))" 2>/dev/null || echo "")
-  api_tunnel_port=$(python3 -c "import yaml; c=yaml.safe_load(open('${STACKS_YAML}')); s=c.get('stacks', {}).get('${stack}', {}); v=s.get('api_tunnel_port', s.get('ollama_tunnel_port')); print(v if v else '')" 2>/dev/null || echo "")
+  local local_port api_tunnel_port
 
-  if [[ -z "$local_port" || ! "$local_port" =~ ^[0-9]+$ ]]; then
-    case "$stack" in
-      text)     local_port=8080 ;;
-      text_pro) local_port=8081 ;;
-      image)    local_port=7860 ;;
-      image_prompt) local_port=7863 ;;
-      video)    local_port=7861 ;;
-      video_lora) local_port=7862 ;;
-      *)        local_port=8080 ;;
-    esac
-  fi
+  # Ein Python-Aufruf für beide Ports
+  local _yaml_result
+  _yaml_result=$(python3 -c "
+import sys, yaml
+c = yaml.safe_load(open('${STACKS_YAML}'))
+s = c.get('stacks', {}).get('${stack}', {})
+lp = s.get('local_port', s.get('service_port', '')) or ''
+at = s.get('api_tunnel_port', s.get('ollama_tunnel_port', '')) or ''
+print(str(lp) + ':' + str(at))
+" 2>/dev/null || echo ":")
+  local_port="${_yaml_result%%:*}"
+  api_tunnel_port="${_yaml_result##*:}"
+  [[ "$local_port" == "None" || -z "$local_port" || ! "$local_port" =~ ^[0-9]+$ ]] && \
+    local_port=$(get_stack_port "$stack")
+  [[ "$api_tunnel_port" == "None" ]] && api_tunnel_port=""
 
-  if [[ "$stack" == "text" || "$stack" == "text_pro" ]]; then
-    if [[ -n "$api_tunnel_port" ]]; then
-      echo "http://127.0.0.1:${local_port} (API: http://127.0.0.1:${api_tunnel_port})"
-    else
-      echo "http://127.0.0.1:${local_port}"
-    fi
+  if [[ -n "$api_tunnel_port" && "$api_tunnel_port" =~ ^[0-9]+$ ]]; then
+    echo "http://127.0.0.1:${local_port} (API: http://127.0.0.1:${api_tunnel_port})"
   else
     echo "http://127.0.0.1:${local_port}"
   fi
@@ -2502,6 +2564,28 @@ cmd_repair() {
   run_manage repair "$stack"
 }
 
+cmd_ssh() {
+  local stack="${1:-}"
+  [[ -n "$stack" ]] || die "Usage: ./studio.sh ssh <stack>"
+  
+  # State laden
+  local sf="$(state_file_for "$stack")"
+  if [[ ! -f "$sf" ]]; then
+    die "Kein State für ${stack} gefunden."
+  fi
+  
+  source "$sf" >/dev/null 2>&1 || true
+  [[ -z "${INSTANCE_IP:-}" || -z "${INSTANCE_PORT:-}" ]] && die "Fehlende Instanzdaten."
+  
+  local label=$(get_stack_label "$stack")
+  print_step "Öffne SSH-Shell für ${label} (${INSTANCE_IP}:${INSTANCE_PORT})..."
+  echo -e "${CYAN}Strg+D oder 'exit' zum Beenden${NC}"
+  echo
+  
+  # SSH mit interaktiver Shell
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "${INSTANCE_PORT}" "root@${INSTANCE_IP}"
+}
+
 cmd_dashboard() {
   render_dashboard
   echo
@@ -2639,7 +2723,7 @@ interactive_menu() {
     box_menu_item " ${YELLOW}[7]${NC} Video-Workflow     ${YELLOW}[8]${NC} Vast-Instanzen       ${YELLOW}[c]${NC} Control Center"
     box_menu_item " ${YELLOW}[d]${NC} Dashboard          ${YELLOW}[g]${NC} Go (Smart Open)      ${YELLOW}[D]${NC} Doctor"
     box_menu_item " ${YELLOW}[l]${NC} Logs               ${YELLOW}[R]${NC} Repair               ${YELLOW}[r]${NC} Status aktual"
-    box_menu_item " ${YELLOW}[h]${NC} Hilfe              ${YELLOW}[q]${NC} Beenden"
+    box_menu_item " ${YELLOW}[s]${NC} SSH (Shell)        ${YELLOW}[h]${NC} Hilfe                ${YELLOW}[q]${NC} Beenden"
     box_menu_end
     echo -ne "${CYAN}Auswahl:${NC} "
     read -r choice
@@ -2659,6 +2743,7 @@ interactive_menu() {
       l|L) read -r -p "Stack: " s; cmd_logs "$s" ;;
       r) print_step "Aktualisiere Status..."; HEALTH_CACHE=(); CACHE_TIMESTAMP=0; refresh_all_stack_states "true"; pause ;;
       R) print_step "Repariere Stack..."; read -r -p "Stack: " s; cmd_repair "$s" ;;
+      s|S) read -r -p "Stack: " s; cmd_ssh "$s" ;;
       h|H) cmd_help; pause ;;
       q|Q) exit 0 ;;
       *) warn "Ungültig"; sleep 1 ;;
