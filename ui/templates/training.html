@@ -1,0 +1,550 @@
+{% extends "base.html" %}
+{% block title %}AI Studio - Training{% endblock %}
+{% block content %}
+<div x-data="trainingApp()" x-init="init()" class="flex flex-col h-screen">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-4 py-2 bg-panel border-b border-border shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-bold text-accent">AI Studio</h1>
+      <nav class="flex items-center gap-1 ml-4 text-xs">
+        <a href="/" class="px-2 py-1 rounded hover:bg-accent/20 transition">Dashboard</a>
+        <a href="/film" class="px-2 py-1 rounded hover:bg-accent/20 transition">Film</a>
+        <a href="/images" class="px-2 py-1 rounded hover:bg-accent/20 transition">Bilder</a>
+        <a href="/text" class="px-2 py-1 rounded hover:bg-accent/20 transition">Text</a>
+        <a href="/training" class="px-2 py-1 bg-accent/20 text-accent rounded transition">Training</a>
+        <a href="/stacks" class="px-2 py-1 rounded hover:bg-accent/20 transition">Stacks</a>
+      </nav>
+      <span class="text-xs px-2 py-0.5 rounded ml-4" :class="stackStatus === 'running' ? 'bg-ok/20 text-ok' : 'bg-gray-700 text-gray-400'"
+            x-text="stackStatus === 'running' ? 'Stack: video_lora ✓' : 'Stack: nicht aktiv'"></span>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="refreshDatasets()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent transition">Refresh</button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- Left: Training Config -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+
+      <!-- Tabs -->
+      <div class="flex items-center gap-2 px-4 py-2 bg-surface border-b border-border shrink-0">
+        <button @click="activeTab = 'train'" :class="activeTab === 'train' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+                class="px-4 py-2 text-sm border-b-2 hover:text-white transition">
+          Training
+        </button>
+        <button @click="activeTab = 'models'" :class="activeTab === 'models' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+                class="px-4 py-2 text-sm border-b-2 hover:text-white transition">
+          Trainierte LoRAs
+        </button>
+      </div>
+
+      <!-- Training Tab -->
+      <div x-show="activeTab === 'train'" class="flex-1 overflow-y-auto p-4 space-y-4">
+
+        <!-- 1. Trainings-Typ -->
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold text-gray-300">1. Trainings-Typ</h3>
+          <div class="flex items-center gap-4">
+            <label class="flex items-center gap-2 text-sm text-gray-300">
+              <input type="radio" x-model="trainingType" value="wan21" class="rounded border-border bg-surface">
+              Wan2.1 Video-LoRA
+            </label>
+            <label class="flex items-center gap-2 text-sm text-gray-300">
+              <input type="radio" x-model="trainingType" value="sdxl" class="rounded border-border bg-surface">
+              SDXL Image-LoRA
+            </label>
+          </div>
+        </div>
+
+        <!-- 2. Dataset -->
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold text-gray-300">2. Dataset</h3>
+          <div class="flex items-center gap-2">
+            <select x-model="selectedDataset" 
+                    class="flex-1 px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+              <option value="">Dataset auswählen...</option>
+              <template x-for="ds in datasets" :key="ds.name">
+                <option :value="ds.path" x-text="ds.name + ' (' + ds.images_count + ' Bilder)'"></option>
+              </template>
+            </select>
+            <button @click="refreshDatasets()" class="px-2 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+              Refresh
+            </button>
+          </div>
+          
+          <!-- Dataset Preview -->
+          <div x-show="selectedDataset" class="bg-panel border border-border rounded p-3">
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-xs text-gray-400" x-text="selectedDataset"></span>
+              <button @click="showDatasetPreview = !showDatasetPreview" class="text-xs text-accent hover:underline">
+                <span x-text="showDatasetPreview ? '▼' : '▶'"></span> Vorschau
+              </button>
+            </div>
+            <div x-show="showDatasetPreview" class="grid grid-cols-5 gap-2">
+              <template x-for="img in datasetPreview" :key="img.filename">
+                <div class="aspect-square bg-surface rounded overflow-hidden">
+                  <img :src="img.path" class="w-full h-full object-cover">
+                </div>
+              </template>
+            </div>
+            <div class="flex gap-4 mt-2 text-xs text-gray-400">
+              <span x-text="'Bilder: ' + (datasetDetails?.images_count || 0)"></span>
+              <span x-text="'Captions: ' + (datasetDetails?.texts_count || 0)"></span>
+              <span x-show="datasetDetails?.has_video" class="text-ok">✓ Video</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 3. Basis-Modell -->
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold text-gray-300">3. Basis-Modell</h3>
+          <select x-model="baseModel" 
+                  class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            <option value="Wan-AI/Wan2.1-T2V-14B-Diffusers">Wan-AI/Wan2.1-T2V-14B-Diffusers</option>
+            <option value="Wan-AI/Wan2.1-I2V-14B-720P-Diffusers">Wan-AI/Wan2.1-I2V-14B-720P-Diffusers</option>
+          </select>
+        </div>
+
+        <!-- 4. LoRA Konfiguration -->
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold text-gray-300">4. LoRA Konfiguration</h3>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-xs text-gray-400">LoRA-Name</label>
+              <input x-model="loraName" type="text" 
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                     placeholder="elena_character_v1">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Trigger-Wort</label>
+              <input x-model="triggerWord" type="text" 
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                     placeholder="sundancer_style">
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Trainings-Parameter -->
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold text-gray-300">5. Trainings-Parameter</h3>
+          <div class="grid grid-cols-3 gap-2">
+            <div>
+              <label class="text-xs text-gray-400">Epochen</label>
+              <input x-model.number="epochs" type="number" min="1" max="100"
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Batch Size</label>
+              <input x-model.number="batchSize" type="number" min="1" max="16"
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Learning Rate</label>
+              <input x-model="learningRate" type="text" 
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                     placeholder="1e-4">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Rank</label>
+              <input x-model.number="rank" type="number" min="1" max="256"
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Alpha</label>
+              <input x-model.number="alpha" type="number" min="1" max="512"
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Resolution</label>
+              <select x-model="resolution" 
+                      class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+                <option value="512x512">512x512</option>
+                <option value="768x768">768x768</option>
+                <option value="1024x1024">1024x1024</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Max Steps</label>
+              <input x-model.number="maxSteps" type="number" min="100" max="10000"
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-400">Warmup Steps</label>
+              <input x-model.number="warmupSteps" type="number" min="0" max="1000"
+                     class="w-full px-2 py-1.5 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+          </div>
+        </div>
+
+        <!-- 6. Stack Status -->
+        <div class="space-y-2">
+          <h3 class="text-sm font-semibold text-gray-300">6. Stack Status</h3>
+          <div class="bg-panel border border-border rounded p-3">
+            <div class="flex justify-between items-center">
+              <div>
+                <p class="text-sm text-gray-300">video_lora (H100/H200, min 80GB VRAM, 220GB Disk)</p>
+                <p class="text-xs text-gray-500" x-text="stackDetails"></p>
+              </div>
+              <div class="flex gap-2">
+                <button @click="checkStack()" class="px-3 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+                  Prüfen
+                </button>
+                <button @click="startStack()" :disabled="stackStatus === 'running'"
+                        class="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/80 disabled:opacity-40">
+                  Starten
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Start Training Button -->
+        <div class="pt-4">
+          <button @click="startTraining()" :disabled="trainingInProgress"
+                  class="px-6 py-2 text-sm bg-accent text-white rounded hover:bg-accent/80 disabled:opacity-40 transition">
+            <span x-show="!trainingInProgress">▶ Training starten</span>
+            <span x-show="trainingInProgress">Training läuft...</span>
+          </button>
+        </div>
+
+        <!-- Progress -->
+        <div x-show="trainingInProgress" class="space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-gray-400">Fortschritt:</span>
+            <span class="text-xs text-accent" x-text="trainingProgress"></span>
+          </div>
+          <div class="w-full h-2 bg-border rounded-full overflow-hidden">
+            <div class="h-full bg-accent transition-all" :style="'width: ' + trainingProgressPercent + '%'"></div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Trained Models Tab -->
+      <div x-show="activeTab === 'models'" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-semibold text-gray-300">Trainierte LoRAs</h3>
+          <div class="flex gap-2">
+            <button @click="refreshLoraModels()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+              Refresh
+            </button>
+            <label class="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/80 cursor-pointer">
+              Upload
+              <input type="file" @change="uploadLora" accept=".safetensors" class="hidden">
+            </label>
+          </div>
+        </div>
+
+        <div class="space-y-3">
+          <template x-for="model in loraModels" :key="model.name">
+            <div class="bg-panel border border-border rounded p-4">
+              <div class="flex justify-between items-start">
+                <div class="flex-1">
+                  <h4 class="text-sm font-semibold text-accent" x-text="model.name"></h4>
+                  <p class="text-xs text-gray-500" x-text="model.filename"></p>
+                  <div class="flex gap-4 mt-2 text-xs text-gray-400">
+                    <span x-text="'Größe: ' + (model.size / 1024 / 1024).toFixed(1) + ' MB'"></span>
+                    <span x-text="'Erstellt: ' + new Date(model.created).toLocaleDateString()"></span>
+                  </div>
+                </div>
+                <div class="flex gap-2">
+                  <button @click="activateLora(model.name)" 
+                          class="px-3 py-1.5 text-xs bg-ok/20 text-ok border border-ok/30 rounded hover:bg-ok/30">
+                    Aktivieren
+                  </button>
+                  <button class="px-3 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+                    Download
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+          <template x-if="loraModels.length === 0">
+            <p class="text-gray-500 text-sm">Keine trainierten LoRAs vorhanden.</p>
+          </template>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right: Log Stream -->
+    <div class="w-96 flex flex-col bg-panel overflow-hidden shrink-0 border-l border-border">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+        <h3 class="text-sm font-semibold text-gray-300">Training Log</h3>
+        <button @click="logs = []" class="text-xs text-gray-500 hover:text-white">Clear</button>
+      </div>
+      <div x-ref="logContainer" class="flex-1 overflow-y-auto px-3 py-2 space-y-0">
+        <template x-for="(line, i) in logs" :key="i">
+          <div class="log-line"
+               :class="line.type === 'error' ? 'text-err' : line.type === 'done' ? 'text-ok font-bold' : 'text-gray-300'"
+               x-text="line.data"></div>
+        </template>
+        <template x-if="logs.length === 0">
+          <div class="text-gray-600 text-xs italic">No logs yet. Start training to see output.</div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+function trainingApp() {
+  return {
+    // State
+    activeTab: 'train',
+    logs: [],
+    
+    // Training config
+    trainingType: 'wan21',
+    datasets: [],
+    selectedDataset: '',
+    datasetPreview: [],
+    datasetDetails: null,
+    showDatasetPreview: false,
+    baseModel: 'Wan-AI/Wan2.1-T2V-14B-Diffusers',
+    loraName: '',
+    triggerWord: 'sundancer_style',
+    
+    // Parameters
+    epochs: 10,
+    batchSize: 1,
+    learningRate: '1e-4',
+    rank: 16,
+    alpha: 32,
+    resolution: '512x512',
+    maxSteps: 1000,
+    warmupSteps: 100,
+    
+    // Stack
+    stackStatus: 'unknown',
+    stackDetails: '',
+    
+    // Training progress
+    trainingInProgress: false,
+    trainingProgress: '0%',
+    trainingProgressPercent: 0,
+    
+    // LoRA models
+    loraModels: [],
+    
+    async init() {
+      await Promise.all([
+        this.refreshDatasets(),
+        this.refreshLoraModels(),
+        this.checkStack(),
+      ]);
+      
+      // Load saved moonshot key
+      const savedKey = localStorage.getItem('moonshot_key');
+      if (savedKey) this.moonshotKey = savedKey;
+    },
+    
+    // --- Datasets ---
+    async refreshDatasets() {
+      try {
+        const r = await fetch('/api/training/datasets');
+        const data = await r.json();
+        this.datasets = data.datasets || [];
+        if (this.datasets.length > 0 && !this.selectedDataset) {
+          this.selectedDataset = this.datasets[0].path;
+          await this.loadDatasetPreview();
+        }
+      } catch(e) {
+        this.addLog('error', 'Failed to load datasets: ' + e.message);
+      }
+    },
+    
+    async loadDatasetPreview() {
+      if (!this.selectedDataset) return;
+      
+      try {
+        const parts = this.selectedDataset.split('/');
+        const name = parts[parts.length - 2] || 'video_training_dataset';
+        const r = await fetch('/api/training/dataset/' + encodeURIComponent(name));
+        const data = await r.json();
+        this.datasetDetails = data;
+        this.datasetPreview = data.preview_images || [];
+      } catch(e) {
+        this.datasetDetails = null;
+        this.datasetPreview = [];
+      }
+    },
+    
+    // --- Stack ---
+    async checkStack() {
+      try {
+        const r = await fetch('/api/stacks/video_lora');
+        const data = await r.json();
+        this.stackStatus = data.status || 'unknown';
+        this.stackDetails = data.details || '';
+      } catch(e) {
+        this.stackStatus = 'unknown';
+        this.stackDetails = '';
+      }
+    },
+    
+    async startStack() {
+      try {
+        const r = await fetch('/api/stacks/video_lora/start', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Stack video_lora gestartet');
+          await this.checkStack();
+        } else {
+          this.addLog('error', 'Stack Start fehlgeschlagen: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    // --- Training ---
+    async startTraining() {
+      if (!this.selectedDataset) {
+        this.addLog('error', 'Bitte Dataset auswählen');
+        return;
+      }
+      if (!this.loraName) {
+        this.addLog('error', 'Bitte LoRA-Namen angeben');
+        return;
+      }
+      
+      this.trainingInProgress = true;
+      this.trainingProgress = '0%';
+      this.trainingProgressPercent = 0;
+      this.logs = [];
+      this.addLog('log', '==> Starte Training: ' + this.loraName);
+      
+      try {
+        // Build URL with query params
+        const params = new URLSearchParams({
+          dataset_path: this.selectedDataset,
+          lora_name: this.loraName,
+          base_model: this.baseModel,
+          trigger_word: this.triggerWord,
+          epochs: this.epochs,
+          batch_size: this.batchSize,
+          learning_rate: this.learningRate,
+          rank: this.rank,
+          alpha: this.alpha,
+          resolution: this.resolution,
+          max_steps: this.maxSteps,
+          warmup_steps: this.warmupSteps,
+        });
+        
+        const url = '/api/training/lora/stream?' + params.toString();
+        const resp = await fetch(url);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, {stream: true});
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop();
+          
+          for (const part of parts) {
+            if (!part.startsWith('data: ')) continue;
+            try {
+              const evt = JSON.parse(part.slice(6));
+              if (evt.type === 'log') {
+                this.addLog('log', evt.data);
+                // Parse progress from "Step XXX/YYY"
+                const match = evt.data.match(/Step (\d+)\/(\d+)/);
+                if (match) {
+                  const current = parseInt(match[1]);
+                  const total = parseInt(match[2]);
+                  this.trainingProgressPercent = (current / total) * 100;
+                  this.trainingProgress = current + ' / ' + total;
+                }
+              } else if (evt.type === 'done') {
+                this.addLog(evt.returncode === 0 ? 'done' : 'error',
+                            evt.returncode === 0 ? '==> Training abgeschlossen' : '==> Fehlgeschlagen (rc=' + evt.returncode + ')');
+                if (evt.returncode === 0) {
+                  await this.refreshLoraModels();
+                }
+              }
+            } catch(e) { /* skip malformed */ }
+          }
+        }
+      } catch(e) {
+        this.addLog('error', 'Connection error: ' + e.message);
+      }
+      
+      this.trainingInProgress = false;
+    },
+    
+    // --- LoRA Models ---
+    async refreshLoraModels() {
+      try {
+        const r = await fetch('/api/training/lora/models');
+        const data = await r.json();
+        this.loraModels = data.models || [];
+      } catch(e) {
+        this.addLog('error', 'Failed to load LoRA models: ' + e.message);
+      }
+    },
+    
+    async uploadLora(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      try {
+        const r = await fetch('/api/training/lora/upload', {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'LoRA uploaded: ' + data.filename);
+          await this.refreshLoraModels();
+        } else {
+          this.addLog('error', 'Upload failed: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async activateLora(name) {
+      try {
+        const r = await fetch('/api/training/lora/' + encodeURIComponent(name) + '/activate', {
+          method: 'PUT',
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'LoRA aktiviert: ' + name);
+        } else {
+          this.addLog('error', 'Aktivierung fehlgeschlagen: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    // --- Log helper ---
+    addLog(type, data) {
+      this.logs.push({type, data});
+      this.$nextTick(() => {
+        const el = this.$refs.logContainer;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+  };
+}
+</script>
+{% endblock %}

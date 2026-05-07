@@ -1,0 +1,413 @@
+{% extends "base.html" %}
+{% block title %}AI Studio - Stacks{% endblock %}
+{% block content %}
+<div x-data="stacksApp()" x-init="init()" class="flex flex-col h-screen">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-4 py-2 bg-panel border-b border-border shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-bold text-accent">AI Studio</h1>
+      <nav class="flex items-center gap-1 ml-4 text-xs">
+        <a href="/" class="px-2 py-1 rounded hover:bg-accent/20 transition">Dashboard</a>
+        <a href="/film" class="px-2 py-1 rounded hover:bg-accent/20 transition">Film</a>
+        <a href="/images" class="px-2 py-1 rounded hover:bg-accent/20 transition">Bilder</a>
+        <a href="/text" class="px-2 py-1 rounded hover:bg-accent/20 transition">Text</a>
+        <a href="/training" class="px-2 py-1 rounded hover:bg-accent/20 transition">Training</a>
+        <a href="/stacks" class="px-2 py-1 bg-accent/20 text-accent rounded transition">Stacks</a>
+      </nav>
+      <span class="text-xs text-gray-500 ml-4" x-text="stacks.length + ' Stacks'"></span>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="refreshStacks()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent transition">Refresh</button>
+      <button @click="stopAllStacks()" class="px-2 py-1 text-xs bg-err/20 text-err border border-err/30 rounded hover:bg-err/30 transition">Alle stoppen</button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- Left: Stack List -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+      
+      <!-- Stack Table -->
+      <div class="flex-1 overflow-y-auto p-4">
+        <table class="w-full text-sm">
+          <thead class="bg-panel sticky top-0">
+            <tr class="text-gray-400">
+              <th class="px-4 py-2 text-left">Stack</th>
+              <th class="px-4 py-2 text-left">Status</th>
+              <th class="px-4 py-2 text-left">GPU</th>
+              <th class="px-4 py-2 text-left">VRAM</th>
+              <th class="px-4 py-2 text-left">Disk</th>
+              <th class="px-4 py-2 text-left">$/h</th>
+              <th class="px-4 py-2 text-right">Aktionen</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="stack in stacks" :key="stack.name">
+              <tr class="border-b border-border/50 hover:bg-panel/50"
+                  :class="expandedStack === stack.name ? 'bg-panel/80' : ''">
+                <td class="px-4 py-3">
+                  <div class="flex items-center gap-2">
+                    <button @click="toggleExpand(stack.name)" class="text-gray-500 hover:text-white w-4">
+                      <span x-text="expandedStack === stack.name ? '▼' : '▶'"></span>
+                    </button>
+                    <span class="font-mono text-accent" x-text="stack.name"></span>
+                  </div>
+                </td>
+                <td class="px-4 py-3">
+                  <span class="px-2 py-1 text-xs rounded"
+                        :class="stack.status === 'running' ? 'bg-ok/20 text-ok' : 
+                                 stack.status === 'stopped' ? 'bg-gray-700 text-gray-400' : 
+                                 'bg-gray-700 text-gray-500'"
+                        x-text="stack.status === 'running' ? '● läuft' : stack.status === 'stopped' ? '○ aus' : '○ unknown'"></span>
+                </td>
+                <td class="px-4 py-3 text-gray-300" x-text="stack.gpu || '—'"></td>
+                <td class="px-4 py-3 text-gray-500" x-text="stack.vram || '—'"></td>
+                <td class="px-4 py-3 text-gray-500" x-text="stack.disk || '—'"></td>
+                <td class="px-4 py-3 text-gray-500" x-text="stack.price || '—'"></td>
+                <td class="px-4 py-3">
+                  <div class="flex justify-end gap-1">
+                    <template x-if="stack.status === 'stopped'">
+                      <button @click="startStack(stack.name)" 
+                              class="px-2 py-1 text-xs bg-accent text-white rounded hover:bg-accent/80">
+                        Starten
+                      </button>
+                    </template>
+                    <template x-if="stack.status === 'running'">
+                      <div class="flex gap-1">
+                        <button @click="openTunnel(stack.name)" 
+                                class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                          Tunnel
+                        </button>
+                        <button @click="stopStack(stack.name)" 
+                                class="px-2 py-1 text-xs bg-err/20 text-err border border-err/30 rounded hover:bg-err/30">
+                          Stop
+                        </button>
+                      </div>
+                    </template>
+                    <button @click="showHealth(stack.name)" 
+                            class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                      Health
+                    </button>
+                  </div>
+                </td>
+              </tr>
+              
+              <!-- Expanded Details -->
+              <tr x-show="expandedStack === stack.name" class="bg-panel/50">
+                <td colspan="7" class="px-4 py-3 border-b border-border">
+                  <div class="grid grid-cols-2 gap-4">
+                    <div>
+                      <h4 class="text-xs font-semibold text-gray-400 mb-2">Details</h4>
+                      <div class="space-y-1 text-xs text-gray-300">
+                        <p x-show="stack.ip"><span class="text-gray-500">IP:</span> <span x-text="stack.ip"></span></p>
+                        <p x-show="stack.port"><span class="text-gray-500">Port:</span> <span x-text="stack.port"></span></p>
+                        <p x-show="stack.tunnel"><span class="text-gray-500">Tunnel:</span> <span x-text="stack.tunnel"></span></p>
+                        <p x-show="stack.vast_id"><span class="text-gray-500">Vast ID:</span> <span x-text="stack.vast_id"></span></p>
+                      </div>
+                    </div>
+                    <div>
+                      <h4 class="text-xs font-semibold text-gray-400 mb-2">Modelle</h4>
+                      <div class="space-y-1 text-xs text-gray-300">
+                        <template x-for="model in stack.models" :key="model">
+                          <p class="flex items-center gap-2">
+                            <span class="text-ok">✓</span>
+                            <span x-text="model"></span>
+                          </p>
+                        </template>
+                        <template x-if="!stack.models || stack.models.length === 0">
+                          <p class="text-gray-500">Keine Modelle installiert</p>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="flex gap-2 mt-3">
+                    <button @click="showLogs(stack.name)" 
+                            class="px-3 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+                      Logs anzeigen
+                    </button>
+                    <button @click="openSSH(stack.name)" 
+                            class="px-3 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+                      SSH öffnen
+                    </button>
+                    <button @click="repairStack(stack.name)" 
+                            class="px-3 py-1.5 text-xs bg-warn/20 text-warn border border-warn/30 rounded hover:bg-warn/30">
+                      Repair
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+        
+        <template x-if="stacks.length === 0">
+          <div class="flex items-center justify-center h-64">
+            <p class="text-gray-500">Keine Stacks gefunden. Klicke "Refresh" zum Laden.</p>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Right: Log Stream -->
+    <div class="w-96 flex flex-col bg-panel overflow-hidden shrink-0 border-l border-border">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+        <h3 class="text-sm font-semibold text-gray-300">Stack Logs</h3>
+        <div class="flex gap-2">
+          <select x-model="logStack" @change="subscribeToLogs()"
+                  class="px-2 py-1 text-xs bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            <option value="">Stack auswählen...</option>
+            <template x-for="stack in stacks" :key="stack.name">
+              <option :value="stack.name" x-text="stack.name"></option>
+            </template>
+          </select>
+          <button @click="logs = []" class="text-xs text-gray-500 hover:text-white">Clear</button>
+        </div>
+      </div>
+      <div x-ref="logContainer" class="flex-1 overflow-y-auto px-3 py-2 space-y-0">
+        <template x-for="(line, i) in logs" :key="i">
+          <div class="log-line"
+               :class="line.type === 'error' ? 'text-err' : line.type === 'done' ? 'text-ok font-bold' : 'text-gray-300'"
+               x-text="line.data"></div>
+        </template>
+        <template x-if="logs.length === 0">
+          <div class="text-gray-600 text-xs italic">Wähle einen Stack für Live-Logs.</div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Health Modal -->
+  <div x-show="showHealthModal" x-cloak
+       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+       @click.self="showHealthModal = false">
+    <div class="bg-panel border border-border rounded-lg p-5 w-[600px] max-h-[80vh] overflow-y-auto">
+      <h3 class="text-sm font-bold text-accent mb-3">Health Check: <span x-text="healthStackName"></span></h3>
+      <div class="space-y-2 text-sm">
+        <template x-for="(check, key) in healthChecks" :key="key">
+          <div class="flex items-center justify-between py-2 border-b border-border/50">
+            <span class="text-gray-300" x-text="key"></span>
+            <span class="px-2 py-1 text-xs rounded"
+                  :class="check ? 'bg-ok/20 text-ok' : 'bg-err/20 text-err'"
+                  x-text="check ? '✓ OK' : '× FAILED'"></span>
+          </div>
+        </template>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button @click="showHealthModal = false" 
+                class="px-4 py-1.5 text-sm bg-surface border border-border rounded hover:border-accent">
+          Schließen
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+function stacksApp() {
+  return {
+    // State
+    stacks: [],
+    expandedStack: null,
+    logs: [],
+    logStack: '',
+    logEventSource: null,
+    
+    // Health modal
+    showHealthModal: false,
+    healthStackName: '',
+    healthChecks: {},
+    
+    async init() {
+      await this.refreshStacks();
+    },
+    
+    // --- Stack Management ---
+    async refreshStacks() {
+      try {
+        const r = await fetch('/api/stacks');
+        const data = await r.json();
+        this.stacks = data.stacks || [];
+      } catch(e) {
+        this.addLog('error', 'Failed to load stacks: ' + e.message);
+      }
+    },
+    
+    async startStack(name) {
+      this.addLog('log', '==> Starte Stack: ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/start', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Stack ' + name + ' gestartet');
+          await this.refreshStacks();
+        } else {
+          this.addLog('error', 'Start failed: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async stopStack(name) {
+      if (!confirm('Stack "' + name + '" wirklich stoppen?')) return;
+      
+      this.addLog('log', '==> Stoppe Stack: ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/stop', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Stack ' + name + ' gestoppt');
+          await this.refreshStacks();
+        } else {
+          this.addLog('error', 'Stop failed: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async stopAllStacks() {
+      if (!confirm('Alle Stacks wirklich stoppen?')) return;
+      
+      for (const stack of this.stacks.filter(s => s.status === 'running')) {
+        await this.stopStack(stack.name);
+      }
+    },
+    
+    async openTunnel(name) {
+      this.addLog('log', '==> Öffne Tunnel für: ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/tunnel', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Tunnel geöffnet für ' + name);
+        } else {
+          this.addLog('error', 'Tunnel failed: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async showHealth(name) {
+      this.healthStackName = name;
+      this.healthChecks = {};
+      this.showHealthModal = true;
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/health');
+        const data = await r.json();
+        
+        // Parse health check results from output
+        const output = data.output || '';
+        this.healthChecks = {
+          'HTTP Check': output.includes('HTTP 200'),
+          'SSH Connection': output.includes('SSH OK'),
+          'Disk Space': !output.includes('disk full'),
+          'VRAM Available': !output.includes('VRAM exhausted'),
+        };
+      } catch(e) {
+        this.healthChecks = { 'Error': false };
+        this.addLog('error', 'Health check failed: ' + e.message);
+      }
+    },
+    
+    async showLogs(name) {
+      this.logStack = name;
+      this.subscribeToLogs();
+    },
+    
+    async openSSH(name) {
+      this.addLog('log', '==> Öffne SSH für: ' + name);
+      // Hinweis: Echte SSH-Öffnung müsste terminal öffnen
+      // Für MVP: Nur Log-Eintrag
+      this.addLog('log', 'SSH würde sich jetzt öffnen (Feature TBD)');
+    },
+    
+    async repairStack(name) {
+      if (!confirm('Stack "' + name + '" reparieren?')) return;
+      
+      this.addLog('log', '==> Repariere Stack: ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/repair', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Stack ' + name + ' repariert');
+          await this.refreshStacks();
+        } else {
+          this.addLog('error', 'Repair failed: ' + (data.detail || 'Unknown'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    // --- UI Helpers ---
+    toggleExpand(name) {
+      this.expandedStack = this.expandedStack === name ? null : name;
+    },
+    
+    // --- Log Streaming ---
+    subscribeToLogs() {
+      if (this.logEventSource) {
+        this.logEventSource.close();
+        this.logEventSource = null;
+      }
+      
+      if (!this.logStack) return;
+      
+      this.logs = [];
+      this.addLog('log', '==> Verbinde zu Logs: ' + this.logStack);
+      
+      const url = '/api/stacks/' + this.logStack + '/logs';
+      this.logEventSource = new EventSource(url);
+      
+      this.logEventSource.onmessage = (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+          if (evt.type === 'log') {
+            this.addLog('log', evt.data);
+          } else if (evt.type === 'done') {
+            this.addLog(evt.returncode === 0 ? 'done' : 'error',
+                        evt.returncode === 0 ? '==> Done' : '==> Failed (rc=' + evt.returncode + ')');
+          }
+        } catch(err) {
+          this.addLog('error', 'Malformed event: ' + err.message);
+        }
+      };
+      
+      this.logEventSource.onerror = () => {
+        this.addLog('error', 'Connection lost');
+        this.logEventSource.close();
+        this.logEventSource = null;
+      };
+    },
+    
+    // --- Log helper ---
+    addLog(type, data) {
+      this.logs.push({type, data});
+      this.$nextTick(() => {
+        const el = this.$refs.logContainer;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+  };
+}
+</script>
+
+<style>
+[x-cloak] { display: none !important; }
+</style>
+{% endblock %}

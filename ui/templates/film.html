@@ -1,0 +1,222 @@
+{% extends "base.html" %}
+{% block title %}AI Studio Film{% endblock %}
+{% block content %}
+<div x-data="filmApp()" x-init="init()" class="flex flex-col h-screen">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-4 py-2 bg-panel border-b border-border shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-bold text-accent">AI Studio</h1>
+      <nav class="flex items-center gap-1 ml-4">
+        <a href="/film" :class="activeTab === 'film' ? 'bg-accent/20 text-accent' : 'text-gray-500 hover:text-white'"
+           @click="activeTab = 'film'"
+           class="px-3 py-1.5 text-sm rounded transition">Film</a>
+        <a href="/images" :class="activeTab === 'images' ? 'bg-accent/20 text-accent' : 'text-gray-500 hover:text-white'"
+           @click="activeTab = 'images'"
+           class="px-3 py-1.5 text-sm rounded transition">Bilder</a>
+        <a href="/text" :class="activeTab === 'text' ? 'bg-accent/20 text-accent' : 'text-gray-500 hover:text-white'"
+           @click="activeTab = 'text'"
+           class="px-3 py-1.5 text-sm rounded transition">Text</a>
+        <a href="/training" :class="activeTab === 'training' ? 'bg-accent/20 text-accent' : 'text-gray-500 hover:text-white'"
+           @click="activeTab = 'training'"
+           class="px-3 py-1.5 text-sm rounded transition">Training</a>
+        <a href="/stacks" :class="activeTab === 'stacks' ? 'bg-accent/20 text-accent' : 'text-gray-500 hover:text-white'"
+           @click="activeTab = 'stacks'"
+           class="px-3 py-1.5 text-sm rounded transition">Stacks</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs text-gray-500" x-text="'Scenes: ' + totalScenes"></span>
+      <span class="text-xs px-2 py-0.5 rounded" :class="stateStatus === 'no_runs' ? 'bg-gray-700 text-gray-400' : 'bg-ok/20 text-ok'"
+            x-text="stateStatus === 'no_runs' ? 'No Run' : 'Run: ' + (stateStatus || '')"></span>
+      <button @click="refreshStatus()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent transition">Refresh</button>
+    </div>
+  </header>
+
+  <!-- Action Bar -->
+  <div class="flex items-center gap-2 px-4 py-2 bg-surface border-b border-border shrink-0 flex-wrap">
+    <button @click="runCmd('init')" :disabled="running"
+            class="px-3 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 disabled:opacity-40 transition">
+      Init
+    </button>
+    <button @click="runCmd('validate')" :disabled="running"
+            class="px-3 py-1.5 text-sm rounded bg-accent2/20 text-accent2 border border-accent2/30 hover:bg-accent2/30 disabled:opacity-40 transition">
+      Validate
+    </button>
+    <button @click="showPilot = true" :disabled="running"
+            class="px-3 py-1.5 text-sm rounded bg-warn/20 text-warn border border-warn/30 hover:bg-warn/30 disabled:opacity-40 transition">
+      Pilot
+    </button>
+    <button @click="showGen = true" :disabled="running"
+            class="px-3 py-1.5 text-sm rounded bg-ok/20 text-ok border border-ok/30 hover:bg-ok/30 disabled:opacity-40 transition">
+      Gen
+    </button>
+    <button @click="runCmd('stitch')" :disabled="running"
+            class="px-3 py-1.5 text-sm rounded bg-accent/20 text-accent border border-accent/30 hover:bg-accent/30 disabled:opacity-40 transition">
+      Stitch
+    </button>
+
+    <!-- Pilot dialog -->
+    <template x-if="showPilot">
+      <div class="flex items-center gap-1 ml-2 bg-panel px-2 py-1 rounded border border-border">
+        <input x-model.number="pilotFrom" type="number" class="w-14 px-1 py-0.5 text-sm bg-surface border border-border rounded text-center" placeholder="From">
+        <span class="text-gray-500 text-xs">to</span>
+        <input x-model.number="pilotTo" type="number" class="w-14 px-1 py-0.5 text-sm bg-surface border border-border rounded text-center" placeholder="To">
+        <button @click="runCmd('pilot', pilotFrom + ' ' + pilotTo); showPilot = false"
+                class="px-2 py-0.5 text-xs bg-warn text-black rounded hover:bg-warn/80">Go</button>
+        <button @click="showPilot = false" class="px-2 py-0.5 text-xs text-gray-500 hover:text-white">X</button>
+      </div>
+    </template>
+
+    <!-- Gen dialog -->
+    <template x-if="showGen">
+      <div class="flex items-center gap-1 ml-2 bg-panel px-2 py-1 rounded border border-border">
+        <input x-model="genSelector" type="text" class="w-20 px-1 py-0.5 text-sm bg-surface border border-border rounded text-center" placeholder="all / id">
+        <button @click="runCmd('gen', genSelector); showGen = false"
+                class="px-2 py-0.5 text-xs bg-ok text-black rounded hover:bg-ok/80">Go</button>
+        <button @click="showGen = false" class="px-2 py-0.5 text-xs text-gray-500 hover:text-white">X</button>
+      </div>
+    </template>
+
+    <!-- Running indicator -->
+    <template x-if="running">
+      <span class="ml-2 text-xs text-accent pulse">Running: <span x-text="currentCmd"></span>...</span>
+    </template>
+  </div>
+
+  <!-- Main Content: 2 columns -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- Left: Config + Scenes -->
+    <div class="flex-1 flex flex-col overflow-hidden border-r border-border">
+
+      <!-- Tabs -->
+      <div class="flex border-b border-border shrink-0">
+        <button @click="leftTab = 'config'" :class="leftTab === 'config' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+                class="px-4 py-2 text-sm border-b-2 hover:text-white transition">Config</button>
+        <button @click="leftTab = 'scenes'" :class="leftTab === 'scenes' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+                class="px-4 py-2 text-sm border-b-2 hover:text-white transition">Scenes</button>
+        <button @click="leftTab = 'videos'" :class="leftTab === 'videos' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+                class="px-4 py-2 text-sm border-b-2 hover:text-white transition">Videos</button>
+      </div>
+
+      <!-- Config Tab -->
+      <div x-show="leftTab === 'config'" class="flex-1 overflow-y-auto p-4 space-y-2">
+        <div class="flex justify-between items-center mb-2">
+          <h3 class="text-sm font-semibold text-gray-300">workflow.conf</h3>
+          <button @click="saveConfig()" class="px-2 py-1 text-xs bg-accent text-white rounded hover:bg-accent/80">Save</button>
+        </div>
+        <template x-for="key in Object.keys(config)" :key="key">
+          <div class="flex items-center gap-2">
+            <label class="w-44 text-xs text-gray-400 truncate font-mono" x-text="key"></label>
+            <input x-model="config[key]"
+                   :type="typeof config[key] === 'number' ? 'number' : 'text'"
+                   class="flex-1 px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+          </div>
+        </template>
+      </div>
+
+      <!-- Scenes Tab -->
+      <div x-show="leftTab === 'scenes'" class="flex-1 overflow-y-auto">
+        <div class="flex justify-between items-center px-4 py-2">
+          <h3 class="text-sm font-semibold text-gray-300">Scenes</h3>
+          <div class="flex gap-2">
+            <button @click="saveScenes()" class="px-2 py-1 text-xs bg-accent text-white rounded hover:bg-accent/80">Save</button>
+            <button @click="refreshScenes()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">Reload</button>
+          </div>
+        </div>
+        <table class="w-full text-xs">
+          <thead class="bg-panel sticky top-0">
+            <tr class="text-gray-400">
+              <th class="px-2 py-1 text-left w-10">ID</th>
+              <th class="px-2 py-1 text-left w-10">Act</th>
+              <th class="px-2 py-1 text-left">Subject</th>
+              <th class="px-2 py-1 text-left">Keywords</th>
+              <th class="px-2 py-1 text-left w-20">Ref</th>
+              <th class="px-2 py-1 text-left w-16">Seed</th>
+              <th class="px-2 py-1 text-left w-8"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="(s, idx) in scenes" :key="s.id">
+              <tr class="border-b border-border/50 hover:bg-panel/50 cursor-pointer" @click="editScene(idx)">
+                <td class="px-2 py-1 font-mono text-accent" x-text="s.id"></td>
+                <td class="px-2 py-1" x-text="s.act"></td>
+                <td class="px-2 py-1 truncate max-w-32" x-text="s.subject"></td>
+                <td class="px-2 py-1 truncate max-w-48 text-gray-400" x-text="s.keywords"></td>
+                <td class="px-2 py-1 text-accent2" x-text="s.ref"></td>
+                <td class="px-2 py-1 font-mono text-gray-500" x-text="s.seed"></td>
+                <td class="px-2 py-1 text-gray-600 hover:text-white">&#9998;</td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Videos Tab -->
+      <div x-show="leftTab === 'videos'" class="flex-1 overflow-y-auto p-4">
+        <h3 class="text-sm font-semibold text-gray-300 mb-2">Generated Videos</h3>
+        <template x-if="Object.keys(runs).length === 0">
+          <p class="text-gray-500 text-sm">No videos generated yet.</p>
+        </template>
+        <template x-for="[runName, runData] in Object.entries(runs)" :key="runName">
+          <div class="mb-4">
+            <h4 class="text-xs font-mono text-accent2 mb-1" x-text="runName + ' (' + runData.clips + ' clips)'"></h4>
+            <div class="grid grid-cols-2 gap-2">
+              <template x-for="vf in runData.files" :key="vf.file">
+                <div class="bg-panel rounded border border-border p-1">
+                  <video controls preload="metadata" class="w-full rounded"
+                         :src="'/api/workflow/video/' + vf.run + '/' + vf.file"></video>
+                  <p class="text-xs text-gray-400 mt-1 truncate" x-text="vf.file + ' (' + (vf.size/1024/1024).toFixed(1) + ' MB)'"></p>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- Right: Log Stream -->
+    <div class="w-96 flex flex-col bg-panel overflow-hidden shrink-0">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+        <h3 class="text-sm font-semibold text-gray-300">Log Stream</h3>
+        <button @click="logs = []" class="text-xs text-gray-500 hover:text-white">Clear</button>
+      </div>
+      <div x-ref="logContainer" class="flex-1 overflow-y-auto px-3 py-2 space-y-0">
+        <template x-for="(line, i) in logs" :key="i">
+          <div class="log-line"
+               :class="line.type === 'error' ? 'text-err' : line.type === 'done' ? 'text-ok font-bold' : 'text-gray-300'"
+               x-text="line.data"></div>
+        </template>
+        <template x-if="logs.length === 0">
+          <div class="text-gray-600 text-xs italic">No logs yet. Run a command to see output here.</div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scene Edit Modal -->
+  <template x-if="editingScene !== null">
+    <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="editingScene = null">
+      <div class="bg-panel border border-border rounded-lg p-5 w-[600px] max-h-[80vh] overflow-y-auto space-y-3">
+        <h3 class="text-sm font-bold text-accent">Edit Scene <span x-text="editingScene?.id"></span></h3>
+        <template x-for="field in ['subject','keywords','visual_focus','environment','ref','seed','fps','seconds']" :key="field">
+          <div>
+            <label class="text-xs text-gray-400 block mb-0.5 font-mono" x-text="field"></label>
+            <input x-model="editingScene[field]"
+                   :type="['seed','fps','seconds'].includes(field) ? 'number' : 'text'"
+                   class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+          </div>
+        </template>
+        <div class="flex gap-2 pt-2">
+          <button @click="saveEditingScene()" class="px-4 py-1.5 text-sm bg-accent text-white rounded hover:bg-accent/80">Save</button>
+          <button @click="editingScene = null" class="px-4 py-1.5 text-sm bg-surface border border-border rounded hover:border-accent">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </template>
+
+</div>
+
+<script src="/static/app.js"></script>
+{% endblock %}

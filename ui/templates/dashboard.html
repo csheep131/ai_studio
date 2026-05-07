@@ -1,0 +1,943 @@
+{% extends "base.html" %}
+{% block title %}AI Studio Dashboard{% endblock %}
+{% block content %}
+<div x-data="dashboardApp()" x-init="init()" class="flex flex-col min-h-screen">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-4 py-2 bg-panel border-b border-border shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-bold text-accent">AI Studio Dashboard</h1>
+      <nav class="flex items-center gap-1 ml-4 text-xs">
+        <a href="/" class="px-2 py-1 rounded hover:bg-accent/20 transition">Dashboard</a>
+        <a href="/film" class="px-2 py-1 rounded hover:bg-accent/20 transition">Film</a>
+        <a href="/images" class="px-2 py-1 rounded hover:bg-accent/20 transition">Bilder</a>
+        <a href="/text" class="px-2 py-1 rounded hover:bg-accent/20 transition">Text</a>
+        <a href="/training" class="px-2 py-1 rounded hover:bg-accent/20 transition">Training</a>
+        <a href="/stacks" class="px-2 py-1 rounded hover:bg-accent/20 transition">Stacks</a>
+      </nav>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="refreshAll()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent transition">
+        Refresh
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Grid -->
+  <div class="flex-1 p-4 overflow-auto">
+    
+    <!-- Summary Cards -->
+    <div class="grid grid-cols-4 gap-4 mb-4">
+      <!-- Total Stacks -->
+      <div class="bg-panel border border-border rounded p-4">
+        <div class="text-xs text-gray-400 mb-1">Stacks Total</div>
+        <div class="text-2xl font-bold" x-text="stacks.length"></div>
+        <div class="text-xs text-gray-500 mt-1" x-text="runningCount + ' laufend'"></div>
+      </div>
+      
+      <!-- Running -->
+      <div class="bg-panel border border-ok/30 rounded p-4">
+        <div class="text-xs text-ok mb-1">Laufend</div>
+        <div class="text-2xl font-bold text-ok" x-text="runningCount"></div>
+        <div class="text-xs text-gray-500 mt-1">Aktive Instanzen</div>
+      </div>
+      
+      <!-- Cost/hour -->
+      <div class="bg-panel border border-warn/30 rounded p-4">
+        <div class="text-xs text-warn mb-1">Kosten/Stunde</div>
+        <div class="text-2xl font-bold text-warn" x-text="totalCostPerHour.toFixed(2) + '$'"></div>
+        <div class="text-xs text-gray-500 mt-1" x-text="totalCostPerDay.toFixed(2) + '$/Tag'"></div>
+      </div>
+      
+      <!-- Local AI -->
+      <div class="bg-panel border border-accent2/30 rounded p-4">
+        <div class="text-xs text-accent2 mb-1">Lokale AI</div>
+        <div class="text-2xl font-bold" :class="localAiRunning ? 'text-ok' : 'text-gray-500'"
+             x-text="localAiRunning ? '✓ Aktiv' : '○ Inaktiv'"></div>
+        <div class="text-xs text-gray-500 mt-1" x-text="localAiModel || 'Kein Modell'"></div>
+      </div>
+    </div>
+
+    <!-- Stacks Grid -->
+    <div class="grid grid-cols-2 gap-4 mb-4">
+      
+      <!-- Text Stacks -->
+      <div class="bg-panel border border-border rounded overflow-hidden">
+        <div class="px-4 py-2 bg-surface border-b border-border flex justify-between items-center">
+          <h3 class="text-sm font-semibold text-accent">Text / LLM</h3>
+          <button @click="showRentModal('text')" class="text-xs px-2 py-1 bg-accent/20 text-accent rounded hover:bg-accent/30">
+            + Mieten
+          </button>
+        </div>
+        <div class="p-3 space-y-2">
+          <template x-for="stack in stacks.filter(s => ['text', 'text_pro', 'qwen_coder_ablit', 'qwen_opus'].includes(s.name))" :key="stack.name">
+            <div class="bg-surface border border-border rounded p-3">
+              <!-- Modus Auswahl -->
+              <div class="flex items-center justify-between mb-2 pb-2 border-b border-border">
+                <div class="flex items-center gap-1 text-xs">
+                  <button @click="setStackMode(stack.name, 'remote')"
+                          class="px-2 py-0.5 rounded transition"
+                          :class="getStackMode(stack.name) === 'remote' ? 'bg-accent text-white' : 'bg-panel text-gray-400 hover:bg-panel/70'">
+                    Remote
+                  </button>
+                  <button @click="setStackMode(stack.name, 'local')"
+                          class="px-2 py-0.5 rounded transition"
+                          :class="getStackMode(stack.name) === 'local' ? 'bg-accent2 text-white' : 'bg-panel text-gray-400 hover:bg-panel/70'">
+                    Lokal
+                  </button>
+                </div>
+                <button @click="showStackModeDetails(stack)" class="text-xs text-gray-500 hover:text-accent">
+                  ⚙
+                </button>
+              </div>
+              
+              <div class="flex justify-between items-start mb-2">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-mono text-accent" x-text="stack.name"></span>
+                    <span class="px-1.5 py-0.5 text-xs rounded"
+                          :class="stack.status === 'running' ? 'bg-ok/20 text-ok' : 'bg-gray-700 text-gray-400'"
+                          x-text="stack.status === 'running' ? '●' : '○'"></span>
+                  </div>
+                  <div class="text-xs text-gray-400 mt-1" x-text="stack.label"></div>
+                  <div class="text-xs mt-1"
+                       :class="getStackMode(stack.name) === 'remote' ? 'text-accent' : 'text-accent2'"
+                       x-text="getStackMode(stack.name) === 'remote' ? '📡 Vast.ai' : '🖥 Lokal'"></div>
+                </div>
+                <div class="text-right">
+                  <div class="text-xs text-warn" x-text="stack.price_per_hour && getStackMode(stack.name) === 'remote' ? stack.price_per_hour + '$/h' : '-'"></div>
+                  <div class="text-xs text-gray-500" x-text="stack.gpu || 'XXX'"></div>
+                </div>
+              </div>
+              
+              <div x-show="stack.status === 'running'" class="space-y-1 text-xs text-gray-400 mb-2">
+                <div class="flex justify-between">
+                  <span>VRAM:</span>
+                  <span x-text="stack.vram_used ? stack.vram_used + '/' + stack.vram_total + ' MB' : 'XXX'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Disk:</span>
+                  <span x-text="stack.disk_used ? stack.disk_used + '/' + stack.disk_total + ' GB' : 'XXX'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Modell:</span>
+                  <span class="truncate max-w-32" x-text="stack.current_model || 'XXX'"></span>
+                </div>
+              </div>
+              
+              <div class="flex gap-1 mt-2">
+                <template x-if="stack.status === 'stopped'">
+                  <button @click="ensureStack(stack.name)" 
+                          class="flex-1 px-2 py-1 text-xs bg-accent text-white rounded hover:bg-accent/80">
+                    Starten
+                  </button>
+                </template>
+                <template x-if="stack.status === 'running'">
+                  <div class="flex gap-1 flex-1">
+                    <button @click="openTunnel(stack.name)" 
+                            class="flex-1 px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent"
+                            title="SSH Tunnel öffnen">
+                      Tunnel
+                    </button>
+                    <button @click="stopStack(stack.name)" 
+                            class="flex-1 px-2 py-1 text-xs bg-err/20 text-err border border-err/30 rounded hover:bg-err/30">
+                      Stop
+                    </button>
+                  </div>
+                </template>
+                <button @click="showStackDetails(stack)" 
+                        class="flex-1 px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                  Details
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Image Stacks -->
+      <div class="bg-panel border border-border rounded overflow-hidden">
+        <div class="px-4 py-2 bg-surface border-b border-border flex justify-between items-center">
+          <h3 class="text-sm font-semibold text-accent2">Image / Bild</h3>
+          <button @click="showRentModal('image')" class="text-xs px-2 py-1 bg-accent2/20 text-accent2 rounded hover:bg-accent2/30">
+            + Mieten
+          </button>
+        </div>
+        <div class="p-3 space-y-2">
+          <template x-for="stack in stacks.filter(s => ['image', 'image_prompt', 'comfyui'].includes(s.name))" :key="stack.name">
+            <div class="bg-surface border border-border rounded p-3">
+              <div class="flex justify-between items-start mb-2">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-mono text-accent2" x-text="stack.name"></span>
+                    <span class="px-1.5 py-0.5 text-xs rounded"
+                          :class="stack.status === 'running' ? 'bg-ok/20 text-ok' : 'bg-gray-700 text-gray-400'"
+                          x-text="stack.status === 'running' ? '●' : '○'"></span>
+                  </div>
+                  <div class="text-xs text-gray-400 mt-1" x-text="stack.label"></div>
+                </div>
+                <div class="text-right">
+                  <div class="text-xs text-warn" x-text="stack.price_per_hour ? stack.price_per_hour + '$/h' : '-'"></div>
+                  <div class="text-xs text-gray-500" x-text="stack.gpu || 'XXX'"></div>
+                </div>
+              </div>
+              
+              <div x-show="stack.status === 'running'" class="space-y-1 text-xs text-gray-400 mb-2">
+                <div class="flex justify-between">
+                  <span>VRAM:</span>
+                  <span x-text="stack.vram_used + '/' + stack.vram_total + ' MB' || 'XXX'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Disk:</span>
+                  <span x-text="stack.disk_used + '/' + stack.disk_total + ' GB' || 'XXX'"></span>
+                </div>
+              </div>
+              
+              <div class="flex gap-1 mt-2">
+                <template x-if="stack.status === 'stopped'">
+                  <button @click="ensureStack(stack.name)" 
+                          class="flex-1 px-2 py-1 text-xs bg-accent2 text-white rounded hover:bg-accent2/80">
+                    Starten
+                  </button>
+                </template>
+                <template x-if="stack.status === 'running'">
+                  <div class="flex gap-1 flex-1">
+                    <button @click="openTunnel(stack.name)" 
+                            class="flex-1 px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                      Tunnel
+                    </button>
+                    <button @click="stopStack(stack.name)" 
+                            class="flex-1 px-2 py-1 text-xs bg-err/20 text-err border border-err/30 rounded hover:bg-err/30">
+                      Stop
+                    </button>
+                  </div>
+                </template>
+                <button @click="showStackDetails(stack)" 
+                        class="flex-1 px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                  Details
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Video Stacks -->
+      <div class="bg-panel border border-border rounded overflow-hidden">
+        <div class="px-4 py-2 bg-surface border-b border-border flex justify-between items-center">
+          <h3 class="text-sm font-semibold text-accent">Video / Film</h3>
+          <button @click="showRentModal('video')" class="text-xs px-2 py-1 bg-accent/20 text-accent rounded hover:bg-accent/30">
+            + Mieten
+          </button>
+        </div>
+        <div class="p-3 space-y-2">
+          <template x-for="stack in stacks.filter(s => ['video', 'video_lora'].includes(s.name))" :key="stack.name">
+            <div class="bg-surface border border-border rounded p-3">
+              <div class="flex justify-between items-start mb-2">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-mono text-accent" x-text="stack.name"></span>
+                    <span class="px-1.5 py-0.5 text-xs rounded"
+                          :class="stack.status === 'running' ? 'bg-ok/20 text-ok' : 'bg-gray-700 text-gray-400'"
+                          x-text="stack.status === 'running' ? '●' : '○'"></span>
+                  </div>
+                  <div class="text-xs text-gray-400 mt-1" x-text="stack.label"></div>
+                </div>
+                <div class="text-right">
+                  <div class="text-xs text-warn" x-text="stack.price_per_hour ? stack.price_per_hour + '$/h' : '-'"></div>
+                  <div class="text-xs text-gray-500" x-text="stack.gpu || 'XXX'"></div>
+                </div>
+              </div>
+              
+              <div x-show="stack.status === 'running'" class="space-y-1 text-xs text-gray-400 mb-2">
+                <div class="flex justify-between">
+                  <span>VRAM:</span>
+                  <span x-text="stack.vram_used + '/' + stack.vram_total + ' MB' || 'XXX'"></span>
+                </div>
+                <div class="flex justify-between">
+                  <span>Disk:</span>
+                  <span x-text="stack.disk_used + '/' + stack.disk_total + ' GB' || 'XXX'"></span>
+                </div>
+              </div>
+              
+              <div class="flex gap-1 mt-2">
+                <template x-if="stack.status === 'stopped'">
+                  <button @click="ensureStack(stack.name)" 
+                          class="flex-1 px-2 py-1 text-xs bg-accent text-white rounded hover:bg-accent/80">
+                    Starten
+                  </button>
+                </template>
+                <template x-if="stack.status === 'running'">
+                  <div class="flex gap-1 flex-1">
+                    <button @click="openTunnel(stack.name)" 
+                            class="flex-1 px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                      Tunnel
+                    </button>
+                    <button @click="stopStack(stack.name)" 
+                            class="flex-1 px-2 py-1 text-xs bg-err/20 text-err border border-err/30 rounded hover:bg-err/30">
+                      Stop
+                    </button>
+                  </div>
+                </template>
+                <button @click="showStackDetails(stack)" 
+                        class="flex-1 px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+                  Details
+                </button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Local AI -->
+      <div class="bg-panel border border-border rounded overflow-hidden">
+        <div class="px-4 py-2 bg-surface border-b border-border flex justify-between items-center">
+          <h3 class="text-sm font-semibold text-gray-300">Lokal (llama.cpp)</h3>
+          <button @click="toggleLocalAi()" 
+                  class="text-xs px-2 py-1 rounded"
+                  :class="localAiRunning ? 'bg-err/20 text-err hover:bg-err/30' : 'bg-ok/20 text-ok hover:bg-ok/30'"
+                  x-text="localAiRunning ? 'Stop' : 'Start'">
+          </button>
+        </div>
+        <div class="p-3">
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between">
+              <span class="text-gray-400">Status:</span>
+              <span :class="localAiRunning ? 'text-ok' : 'text-gray-500'" x-text="localAiRunning ? '✓ läuft' : '○ gestoppt'"></span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Port:</span>
+              <span class="text-gray-300">8080</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">Modell:</span>
+              <span class="text-gray-300 truncate max-w-48" x-text="localAiModel || 'Nicht geladen'"></span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-gray-400">API:</span>
+              <span class="text-accent2">http://127.0.0.1:8080/v1</span>
+            </div>
+          </div>
+          
+          <div class="mt-3 space-y-2">
+            <div>
+              <label class="text-xs text-gray-400">Modell auswählen</label>
+              <select x-model="selectedLocalModel" 
+                      class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+                <option value="">Modell wählen...</option>
+                <template x-for="model in localModels" :key="model">
+                  <option :value="model" x-text="model"></option>
+                </template>
+              </select>
+            </div>
+            <button @click="loadLocalModel()" :disabled="!selectedLocalModel"
+                    class="w-full px-2 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/80 disabled:opacity-40">
+              Modell laden
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="bg-panel border border-border rounded p-4 mb-4">
+      <h3 class="text-sm font-semibold text-gray-300 mb-3">Quick Actions</h3>
+      <div class="grid grid-cols-4 gap-2">
+        <a href="/images" 
+           :class="isStackReady('image') ? 'hover:bg-accent/20 cursor-pointer' : 'opacity-50 cursor-not-allowed'"
+           class="px-4 py-3 bg-surface border border-border rounded text-center transition">
+          <div class="text-xs text-gray-400 mb-1">Bilderstellung</div>
+          <div class="text-sm" :class="isStackReady('image') ? 'text-accent' : 'text-gray-500'"
+               x-text="isStackReady('image') ? '→ Öffnen' : 'Stack benötigt'"></div>
+        </a>
+        
+        <a href="/training" 
+           :class="isStackReady('video_lora') ? 'hover:bg-accent/20 cursor-pointer' : 'opacity-50 cursor-not-allowed'"
+           class="px-4 py-3 bg-surface border border-border rounded text-center transition">
+          <div class="text-xs text-gray-400 mb-1">LoRA Training</div>
+          <div class="text-sm" :class="isStackReady('video_lora') ? 'text-accent' : 'text-gray-500'"
+               x-text="isStackReady('video_lora') ? '→ Öffnen' : 'Stack benötigt'"></div>
+        </a>
+        
+        <a href="/film" 
+           :class="isStackReady('video') ? 'hover:bg-accent/20 cursor-pointer' : 'opacity-50 cursor-not-allowed'"
+           class="px-4 py-3 bg-surface border border-border rounded text-center transition">
+          <div class="text-xs text-gray-400 mb-1">Film Workflow</div>
+          <div class="text-sm" :class="isStackReady('video') ? 'text-accent' : 'text-gray-500'"
+               x-text="isStackReady('video') ? '→ Öffnen' : 'Stack benötigt'"></div>
+        </a>
+        
+        <a href="/chat" 
+           :class="isStackReady('text') ? 'hover:bg-accent/20 cursor-pointer' : 'opacity-50 cursor-not-allowed'"
+           class="px-4 py-3 bg-surface border border-border rounded text-center transition">
+          <div class="text-xs text-gray-400 mb-1">AI Chat</div>
+          <div class="text-sm" :class="isStackReady('text') ? 'text-accent' : 'text-gray-500'"
+               x-text="isStackReady('text') ? '→ Öffnen' : 'Stack benötigt'"></div>
+        </a>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Stack Details Modal -->
+  <div x-show="showDetailsModal" x-cloak
+       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+       @click.self="showDetailsModal = false">
+    <div class="bg-panel border border-border rounded-lg p-5 w-[700px] max-h-[80vh] overflow-y-auto">
+      <h3 class="text-lg font-bold text-accent mb-3" x-text="selectedStack?.label || 'Stack Details'"></h3>
+      
+      <div class="grid grid-cols-2 gap-4 text-sm">
+        <div>
+          <div class="text-gray-400 mb-1">Name</div>
+          <div class="font-mono text-gray-300" x-text="selectedStack?.name"></div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">Status</div>
+          <div>
+            <span class="px-2 py-1 text-xs rounded"
+                  :class="selectedStack?.status === 'running' ? 'bg-ok/20 text-ok' : 'bg-gray-700 text-gray-400'"
+                  x-text="selectedStack?.status === 'running' ? '● läuft' : '○ gestoppt'"></span>
+          </div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">GPU</div>
+          <div class="text-gray-300" x-text="selectedStack?.gpu || 'XXX'"></div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">Preis</div>
+          <div class="text-warn" x-text="selectedStack?.price_per_hour ? selectedStack?.price_per_hour + '$/h' : '-'"></div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">Vast ID</div>
+          <div class="font-mono text-gray-300" x-text="selectedStack?.vast_id || 'XXX'"></div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">IP Address</div>
+          <div class="text-gray-300" x-text="selectedStack?.ip || 'XXX'"></div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">Tunnel</div>
+          <div class="text-accent2" x-text="selectedStack?.tunnel ? 'localhost:' + selectedStack?.tunnel_port : 'Nicht geöffnet'"></div>
+        </div>
+        <div>
+          <div class="text-gray-400 mb-1">Modell</div>
+          <div class="text-gray-300 truncate" x-text="selectedStack?.default_model || 'XXX'"></div>
+        </div>
+      </div>
+      
+      <div class="mt-4 border-t border-border pt-4">
+        <h4 class="text-sm font-semibold text-gray-300 mb-2">Aktionen</h4>
+        <div class="flex gap-2">
+          <template x-if="selectedStack?.status === 'stopped'">
+            <button @click="ensureStack(selectedStack.name); showDetailsModal = false"
+                    class="px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/80">
+              Starten
+            </button>
+          </template>
+          <template x-if="selectedStack?.status === 'running'">
+            <button @click="openTunnel(selectedStack.name)"
+                    class="px-4 py-2 text-sm bg-panel border border-border rounded hover:border-accent">
+              Tunnel öffnen
+            </button>
+          </template>
+          <button @click="showHealth(selectedStack?.name)"
+                  class="px-4 py-2 text-sm bg-panel border border-border rounded hover:border-accent">
+            Health Check
+          </button>
+          <template x-if="selectedStack?.status === 'running'">
+            <button @click="stopStack(selectedStack.name); showDetailsModal = false"
+                    class="px-4 py-2 text-sm bg-err/20 text-err border border-err/30 rounded hover:bg-err/30">
+              Stoppen
+            </button>
+          </template>
+        </div>
+      </div>
+      
+      <div class="flex justify-end mt-4">
+        <button @click="showDetailsModal = false"
+                class="px-4 py-2 text-sm bg-surface border border-border rounded hover:border-accent">
+          Schließen
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+function dashboardApp() {
+  return {
+    // State
+    stacks: [],
+    runningCount: 0,
+    totalCostPerHour: 0,
+    totalCostPerDay: 0,
+    
+    // Local AI
+    localAiRunning: false,
+    localAiModel: '',
+    localModels: [],
+    selectedLocalModel: '',
+    
+    // Stack Configs
+    stackConfigs: {},
+    
+    // Modal
+    showDetailsModal: false,
+    selectedStack: null,
+    showModeModal: false,
+    showModelSelectModal: false,
+    modelSelectTarget: null,
+    
+    async init() {
+      await Promise.all([
+        this.refreshStacks(),
+        this.loadStackConfigs(),
+        this.checkLocalAi(),
+      ]);
+    },
+    
+    // --- Stack Config ---
+    async loadStackConfigs() {
+      try {
+        const r = await fetch('/api/stack-config');
+        const data = await r.json();
+        this.stackConfigs = data.configs || {};
+      } catch(e) {
+        console.error('Failed to load stack configs:', e);
+        this.stackConfigs = {};
+      }
+    },
+    
+    getStackMode(stackName) {
+      return this.stackConfigs[stackName]?.mode || 'remote';
+    },
+    
+    async setStackMode(stackName, mode) {
+      this.stackConfigs[stackName] = { mode, local_model: null };
+      
+      try {
+        const r = await fetch(`/api/stack-config/${stackName}/mode?mode=${mode}`, {
+          method: 'POST',
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          console.log(`Stack ${stackName} mode set to ${mode}`);
+        }
+      } catch(e) {
+        console.error('Failed to set stack mode:', e);
+      }
+    },
+    
+    showStackModeDetails(stack) {
+      const mode = this.getStackMode(stack.name);
+      const model = this.stackConfigs[stack.name]?.local_model || 'Kein Modell ausgewählt';
+      
+      alert(`Stack: ${stack.name}\n\n` +
+            `Modus: ${mode === 'remote' ? '📡 Vast.ai (Remote)' : '🖥 Lokal (llama.cpp)'}\n\n` +
+            `Aktuelles Modell: ${model}\n\n` +
+            `Um den Modus zu ändern, klicke auf "Remote" oder "Lokal" oben im Stack.`);
+    },
+    
+    // --- Stack Management ---
+    async refreshStacks() {
+      try {
+        const r = await fetch('/api/stacks');
+        const data = await r.json();
+        this.stacks = data.stacks || [];
+        
+        // Calculate summary
+        this.runningCount = this.stacks.filter(s => s.status === 'running').length;
+        this.totalCostPerHour = this.stacks
+          .filter(s => s.status === 'running' && s.price_per_hour !== 'XXX')
+          .reduce((sum, s) => sum + (parseFloat(s.price_per_hour) || 0), 0);
+        this.totalCostPerDay = this.totalCostPerHour * 24;
+      } catch(e) {
+        console.error('Failed to load stacks:', e);
+      }
+    },
+    
+    async ensureStack(name) {
+      const mode = this.getStackMode(name);
+      
+      if (mode === 'local') {
+        await this.ensureLocalStack(name);
+        return;
+      }
+      
+      if (!confirm('Stack "' + name + '" wirklich starten? Dies mietet eine GPU-Instanz auf Vast.ai.')) return;
+      
+      this.addLog('log', '==> Starte Stack (Remote): ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/ensure', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok || data.output) {
+          this.addLog('log', data.output || 'Start erfolgreich');
+          await new Promise(r => setTimeout(r, 3000));
+          await this.refreshStacks();
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.detail || data.error || 'Unbekannter Fehler'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async ensureLocalStack(name) {
+      this.modelSelectTarget = name;
+      const config = this.stackConfigs[name] || {};
+      let model = config.local_model;
+      let source = config.model_source || 'ollama';
+      
+      // Wenn bereits ein Modell konfiguriert ist, direkt starten
+      if (model) {
+        await this.startLocalModel(name, model, source);
+        return;
+      }
+      
+      // Wenn keine Modelle verfügbar sind
+      if (this.localModels.length === 0) {
+        alert('Keine lokalen Modelle gefunden. Bitte stelle sicher dass Open WebUI oder Ollama läuft und Modelle geladen sind.');
+        return;
+      }
+      
+      // Modal zur Modellauswahl zeigen
+      this.showModelSelectModal = true;
+    },
+    
+    async selectModel(modelName, source) {
+      if (!this.modelSelectTarget) return;
+      
+      await this.setLocalStackModel(this.modelSelectTarget, modelName, source);
+      this.showModelSelectModal = false;
+      
+      await this.startLocalModel(this.modelSelectTarget, modelName, source);
+      this.modelSelectTarget = null;
+    },
+    
+    async startLocalModel(name, model, source) {
+      this.addLog('log', '==> Starte lokale AI (' + source + '): ' + model);
+      
+      // Für Open WebUI / Ollama: Modell ist bereits verfügbar
+      if (source === 'ollama' || source === 'open-webui') {
+        this.localAiRunning = true;
+        this.localAiModel = model;
+        this.addLog('log', 'Modell verfügbar über: ' + (source === 'ollama' ? this.ollamaUrl : this.openWebUiUrl));
+        this.addLog('log', 'API: http://127.0.0.1:8080/v1');
+        alert('Lokale AI bereit!\n\nModell: ' + model + '\nQuelle: ' + source + '\nAPI: http://127.0.0.1:8080/v1');
+        return;
+      }
+      
+      // Für llama.cpp direkt: Server starten
+      try {
+        const r = await fetch('/api/local/ai/model', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ model: model, source: source }),
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.localAiRunning = true;
+          this.localAiModel = model;
+          this.addLog('log', 'API: http://127.0.0.1:8080/v1');
+          alert('Lokale AI gestartet!\n\nModell: ' + model + '\nAPI: http://127.0.0.1:8080/v1');
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.error || data.detail));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async setLocalStackModel(stackName, model, source = 'ollama') {
+      this.stackConfigs[stackName] = { 
+        ...(this.stackConfigs[stackName] || {}), 
+        mode: 'local', 
+        local_model: model,
+        model_source: source,
+      };
+      try {
+        const r = await fetch('/api/stack-config/' + stackName + '/mode?mode=local&model=' + encodeURIComponent(model), { 
+          method: 'POST' 
+        });
+        await r.json();
+        this.addLog('log', 'Modell gespeichert: ' + model + ' (' + source + ')');
+      } catch(e) { 
+        console.error('Failed to save local model:', e); 
+      }
+    },
+    
+    async stopStack(name) {
+      if (!confirm('Stack "' + name + '" wirklich stoppen? Die Instanz wird freigegeben.')) return;
+      
+      this.addLog('log', '==> Stoppe Stack: ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/stop', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok || data.output) {
+          this.addLog('log', 'Stack "' + name + '" gestoppt');
+          this.addLog('log', data.output || '');
+          await this.refreshStacks();
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.detail || data.error || 'Unbekannter Fehler'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async openTunnel(name) {
+      this.addLog('log', '==> Öffne Tunnel für: ' + name);
+      
+      try {
+        const r = await fetch('/api/stacks/' + name + '/tunnel', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok || data.output) {
+          const port = data.port || 'siehe Logs';
+          this.addLog('log', 'SSH Tunnel für "' + name + '" geöffnet.');
+          this.addLog('log', 'Port: ' + port);
+          this.addLog('log', data.output || '');
+          alert('Tunnel geöffnet!\nStack: ' + name + '\n' + (data.output || 'Port: ' + port));
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.detail || data.error || 'Unbekannter Fehler'));
+          alert('Fehler: ' + (data.detail || data.error || 'Unbekannter Fehler'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+        alert('Error: ' + e.message);
+      }
+    },
+    
+    async showHealth(name) {
+      try {
+        const r = await fetch('/api/stacks/' + name + '/health');
+        const data = await r.json();
+        const output = data.output || data.error || 'Keine Details verfügbar';
+        this.addLog('log', 'Health Check für ' + name + ':');
+        this.addLog('log', output);
+        alert('Health Check für ' + name + ':\n\n' + output);
+      } catch(e) {
+        this.addLog('error', 'Health check failed: ' + e.message);
+        alert('Error: ' + e.message);
+      }
+    },
+    
+    showStackDetails(stack) {
+      this.selectedStack = stack;
+      this.showDetailsModal = true;
+    },
+    
+    showRentModal(type) {
+      alert('Um einen Stack zu mieten, verwende:\n\n' +
+            '1. Im Dashboard: "Starten" klicken\n' +
+            '2. Oder studio.sh CLI: ./studio.sh go <stack>\n\n' +
+            'Dies mietet automatisch eine passende GPU-Instanz und richtet alles ein.');
+    },
+    
+    // --- Local AI ---
+    async checkLocalAi() {
+      try {
+        const r = await fetch('/api/local/ai/status');
+        const data = await r.json();
+        this.localAiRunning = data.running || false;
+        this.localAiModel = data.llama_cpp?.model || '';
+        
+        // Kombiniere Modelle von allen Quellen
+        const ollamaModels = (data.ollama?.models || []).map(m => ({ name: m, source: 'ollama' }));
+        const openWebUiModels = (data.open_webui?.models || []).map(m => ({ name: m, source: 'open-webui' }));
+        const llamaCppModels = (data.llama_cpp?.models || []).map(m => ({ name: m, source: 'llama_cpp' }));
+        
+        this.localModels = [...ollamaModels, ...openWebUiModels, ...llamaCppModels].filter((v, i, a) => 
+          a.findIndex(t => t.name === v.name) === i
+        );
+        
+        // Speichere Status für UI
+        this.openWebUiRunning = data.open_webui?.running || false;
+        this.ollamaRunning = data.ollama?.running || false;
+        this.openWebUiUrl = data.open_webui?.url || '';
+        this.ollamaUrl = data.ollama?.url || '';
+      } catch(e) {
+        // Local AI API nicht verfügbar
+        this.localAiRunning = false;
+        this.localModels = [];
+      }
+    },
+    
+    async toggleLocalAi() {
+      if (this.localAiRunning) {
+        await this.stopLocalAi();
+      } else {
+        await this.startLocalAi();
+      }
+    },
+    
+    async startLocalAi() {
+      if (this.localModels.length === 0) {
+        alert('Keine Modelle verfügbar. Bitte GGUF-Modelle in ~/models oder ~/.local/share/goose/models ablegen.');
+        return;
+      }
+      
+      if (!this.selectedLocalModel) {
+        this.selectedLocalModel = this.localModels[0];
+      }
+      
+      this.addLog('log', '==> Starte lokale AI mit: ' + this.selectedLocalModel);
+      
+      try {
+        const r = await fetch('/api/local/ai/start', { 
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ model: this.selectedLocalModel }),
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.localAiRunning = true;
+          this.localAiModel = this.selectedLocalModel;
+          this.addLog('log', 'Lokale AI gestartet: ' + this.selectedLocalModel);
+          this.addLog('log', 'API: http://127.0.0.1:8080/v1');
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.error || data.detail || 'Unbekannter Fehler'));
+          alert('Fehler: ' + (data.error || data.detail || 'Unbekannter Fehler'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+        alert('Error: ' + e.message);
+      }
+    },
+    
+    async stopLocalAi() {
+      if (!confirm('Lokale AI wirklich stoppen?')) return;
+      
+      this.addLog('log', '==> Stoppe lokale AI');
+      
+      try {
+        const r = await fetch('/api/local/ai/stop', { method: 'POST' });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.localAiRunning = false;
+          this.localAiModel = '';
+          this.addLog('log', 'Lokale AI gestoppt');
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.error || data.detail || 'Unbekannter Fehler'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+    },
+    
+    async loadLocalModel() {
+      if (!this.selectedLocalModel) {
+        alert('Bitte Modell auswählen');
+        return;
+      }
+      
+      this.addLog('log', '==> Lade Modell: ' + this.selectedLocalModel);
+      
+      try {
+        const r = await fetch('/api/local/ai/model', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ model: this.selectedLocalModel }),
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.localAiRunning = true;
+          this.localAiModel = this.selectedLocalModel;
+          this.addLog('log', 'Modell geladen: ' + this.selectedLocalModel);
+          this.addLog('log', 'API: http://127.0.0.1:8080/v1');
+          alert('Modell geladen: ' + this.selectedLocalModel + '\n\nAPI: http://127.0.0.1:8080/v1');
+        } else {
+          this.addLog('error', 'Fehler: ' + (data.error || data.detail || 'Unbekannter Fehler'));
+          alert('Fehler: ' + (data.error || data.detail || 'Unbekannter Fehler'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+        alert('Error: ' + e.message);
+      }
+    },
+    
+    // --- Helper ---
+    isStackReady(stackName) {
+      const stack = this.stacks.find(s => s.name === stackName);
+      return stack && stack.status === 'running';
+    },
+    
+    async refreshAll() {
+      await Promise.all([
+        this.refreshStacks(),
+        this.checkLocalAi(),
+      ]);
+    },
+    
+    // --- Log helper ---
+    addLog(type, data) {
+      this.logs.push({type, data});
+      this.$nextTick(() => {
+        const el = this.$refs.logContainer;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+  };
+}
+
+  <!-- Model Select Modal -->
+  <div x-show="showModelSelectModal" x-cloak
+       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+       @click.self="showModelSelectModal = false">
+    <div class="bg-panel border border-border rounded-lg p-5 w-[700px] max-h-[80vh] overflow-y-auto">
+      <h3 class="text-lg font-bold text-accent mb-3">Lokales Modell auswählen</h3>
+      <p class="text-sm text-gray-400 mb-3">Wähle ein Modell für Stack:</p>
+      
+      <div class="space-y-2 max-h-96 overflow-y-auto">
+        <template x-for="(model, idx) in localModels" :key="idx">
+          <button @click="selectModel(model.name, model.source)"
+                  class="w-full text-left p-3 bg-surface border border-border rounded hover:border-accent transition flex justify-between items-center">
+            <div>
+              <div class="text-sm font-mono text-accent" x-text="model.name"></div>
+              <div class="text-xs text-gray-500" x-text="model.source"></div>
+            </div>
+            <span class="px-2 py-1 text-xs rounded"
+                  :class="model.source === 'ollama' ? 'bg-accent/20 text-accent' : 
+                          model.source === 'open-webui' ? 'bg-accent2/20 text-accent2' : 'bg-gray-700 text-gray-300'"
+                  x-text="model.source">
+            </span>
+          </button>
+        </template>
+      </div>
+      
+      <div class="flex justify-end mt-4">
+        <button @click="showModelSelectModal = false"
+                class="px-4 py-2 text-sm bg-surface border border-border rounded hover:border-accent">
+          Abbrechen
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+  <!-- Model Select Modal -->
+  <div x-show="showModelSelectModal" x-cloak
+       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+       @click.self="showModelSelectModal = false">
+    <div class="bg-panel border border-border rounded-lg p-5 w-[700px] max-h-[80vh] overflow-y-auto">
+      <h3 class="text-lg font-bold text-accent mb-3">Lokales Modell auswählen</h3>
+      <p class="text-sm text-gray-400 mb-3">Wähle ein Modell für Stack "
+</script>
+
+<style>
+[x-cloak] { display: none !important; }
+</style>
+{% endblock %}

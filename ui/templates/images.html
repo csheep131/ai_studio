@@ -1,0 +1,571 @@
+{% extends "base.html" %}
+{% block title %}AI Studio - Bilder{% endblock %}
+{% block content %}
+<div x-data="imagesApp()" x-init="init()" class="flex flex-col h-screen">
+
+  <!-- Top Bar -->
+  <header class="flex items-center justify-between px-4 py-2 bg-panel border-b border-border shrink-0">
+    <div class="flex items-center gap-3">
+      <h1 class="text-lg font-bold text-accent">AI Studio</h1>
+      <nav class="flex items-center gap-1 ml-4 text-xs">
+        <a href="/" class="px-2 py-1 rounded hover:bg-accent/20 transition">Dashboard</a>
+        <a href="/film" class="px-2 py-1 rounded hover:bg-accent/20 transition">Film</a>
+        <a href="/images" class="px-2 py-1 bg-accent/20 text-accent rounded transition">Bilder</a>
+        <a href="/text" class="px-2 py-1 rounded hover:bg-accent/20 transition">Text</a>
+        <a href="/training" class="px-2 py-1 rounded hover:bg-accent/20 transition">Training</a>
+        <a href="/stacks" class="px-2 py-1 rounded hover:bg-accent/20 transition">Stacks</a>
+      </nav>
+      <span class="text-xs text-gray-500 ml-4" x-text="'Dataset: ' + datasetStatus.images_count + ' Bilder'"></span>
+      <span class="text-xs px-2 py-0.5 rounded" :class="stackStatus === 'running' ? 'bg-ok/20 text-ok' : 'bg-gray-700 text-gray-400'"
+            x-text="stackStatus === 'running' ? 'Stack: image ✓' : 'Stack: nicht aktiv'"></span>
+    </div>
+    <div class="flex items-center gap-2">
+      <button @click="refreshDatasetStatus()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent transition">Refresh</button>
+    </div>
+  </header>
+
+  <!-- Tabs -->
+  <div class="flex items-center gap-2 px-4 py-2 bg-surface border-b border-border shrink-0">
+    <button @click="activeTab = 'dataset'" :class="activeTab === 'dataset' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+            class="px-4 py-2 text-sm border-b-2 hover:text-white transition">
+      Dataset erstellen
+    </button>
+    <button @click="activeTab = 'single'" :class="activeTab === 'single' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+            class="px-4 py-2 text-sm border-b-2 hover:text-white transition">
+      Einzelbild
+    </button>
+    <button @click="activeTab = 'master'" :class="activeTab === 'master' ? 'border-accent text-accent' : 'border-transparent text-gray-500'"
+            class="px-4 py-2 text-sm border-b-2 hover:text-white transition">
+      Master-Bilder
+    </button>
+  </div>
+
+  <!-- Main Content -->
+  <div class="flex flex-1 overflow-hidden">
+
+    <!-- Left: Content Area -->
+    <div class="flex-1 flex flex-col overflow-hidden">
+
+      <!-- Dataset Tab -->
+      <div x-show="activeTab === 'dataset'" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <h3 class="text-sm font-semibold text-gray-300">Referenzbild-Dataset (local_pics.py)</h3>
+        
+        <!-- 1. Referenzbild -->
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">1. Referenzbild</label>
+          <div class="flex items-center gap-2">
+            <input x-model="initImagePath" type="text" 
+                   class="flex-1 px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                   placeholder="test.jpg oder Pfad eingeben">
+            <button @click="$refs.fileInput.click()" 
+                    class="px-3 py-1.5 text-sm bg-panel border border-border rounded hover:border-accent transition">
+              Durchsuchen
+            </button>
+            <input x-ref="fileInput" type="file" accept="image/*" class="hidden" @change="handleFileSelect">
+          </div>
+          <div x-show="previewImage" class="mt-2">
+            <img :src="previewImage" class="h-32 rounded border border-border">
+          </div>
+        </div>
+
+        <!-- 2. Basis-Prompt -->
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">2. Basis-Prompt</label>
+          <textarea x-model="basePrompt" rows="3"
+                    class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                    placeholder="Photorealistic portrait of a stunning woman, black pageboy haircut, striking blue eyes, [trigger]"></textarea>
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-gray-400">Trigger-Wort:</label>
+            <input x-model="triggerWord" type="text" 
+                   class="w-48 px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                   placeholder="sundancer_style">
+          </div>
+        </div>
+
+        <!-- 3. Einstellungen -->
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">3. Einstellungen</label>
+          <div class="grid grid-cols-4 gap-2">
+            <div>
+              <label class="text-xs text-gray-500">Anzahl</label>
+              <input x-model.number="numImages" type="number" min="1" max="100"
+                     class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Strength</label>
+              <input x-model.number="strength" type="number" step="0.05" min="0" max="1"
+                     class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Guidance</label>
+              <input x-model.number="guidance" type="number" step="0.1" min="1" max="10"
+                     class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+            <div>
+              <label class="text-xs text-gray-500">Steps</label>
+              <input x-model.number="steps" type="number" min="1" max="50"
+                     class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. LoRAs -->
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">4. Aktive LoRAs</label>
+          <div class="space-y-1">
+            <template x-for="(lora, idx) in activeLoras" :key="idx">
+              <div class="flex items-center gap-2">
+                <input type="checkbox" :checked="lora.enabled" @change="lora.enabled = $event.target.checked"
+                       class="rounded border-border bg-surface">
+                <span class="text-xs text-gray-300 w-48" x-text="lora.name"></span>
+                <input type="range" :value="lora.strength" @input="lora.strength = $event.target.value"
+                       min="0" max="1" step="0.1"
+                       class="flex-1 h-2 bg-border rounded-lg appearance-none cursor-pointer">
+                <span class="text-xs text-gray-500 w-8 text-right" x-text="lora.strength"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- 5. Optionen -->
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">5. Optionen</label>
+          <div class="flex items-center gap-4">
+            <label class="flex items-center gap-2 text-xs text-gray-300">
+              <input type="checkbox" x-model="createVideo" class="rounded border-border bg-surface">
+              Konsistenz-Video erstellen
+            </label>
+            <label class="flex items-center gap-2 text-xs text-gray-300">
+              <input type="checkbox" x-model="useMoonshot" class="rounded border-border bg-surface">
+              Moonshot API für Variationen
+            </label>
+          </div>
+          <div x-show="useMoonshot" class="flex items-center gap-2">
+            <label class="text-xs text-gray-400">API Key:</label>
+            <input x-model="moonshotKey" type="password" 
+                   class="flex-1 px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                   placeholder="Moonshot API Key">
+            <button @click="saveMoonshotKey()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+              Speichern
+            </button>
+          </div>
+        </div>
+
+        <!-- Generate Button -->
+        <div class="pt-4">
+          <button @click="startDatasetGeneration()" :disabled="generating"
+                  class="px-6 py-2 text-sm bg-accent text-white rounded hover:bg-accent/80 disabled:opacity-40 transition">
+            <span x-show="!generating">▶ Dataset generieren</span>
+            <span x-show="generating">Generiere...</span>
+          </button>
+        </div>
+
+        <!-- Progress -->
+        <div x-show="generating" class="space-y-2">
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-gray-400">Fortschritt:</span>
+            <span class="text-xs text-accent" x-text="generationProgress + ' / ' + numImages"></span>
+          </div>
+          <div class="w-full h-2 bg-border rounded-full overflow-hidden">
+            <div class="h-full bg-accent transition-all" :style="'width: ' + ((generationProgress / numImages) * 100) + '%'"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Single Image Tab -->
+      <div x-show="activeTab === 'single'" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <h3 class="text-sm font-semibold text-gray-300">Einzelbild-Generierung</h3>
+        
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">Prompt</label>
+          <textarea x-model="singlePrompt" rows="4"
+                    class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                    placeholder="Elena in rain-soaked boutique entrance, neon reflections, cinematic lighting..."></textarea>
+        </div>
+
+        <div class="space-y-2">
+          <label class="text-xs text-gray-400">Negative Prompt</label>
+          <input x-model="singleNegativePrompt" type="text"
+                 class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                 value="blurry, low quality, artifacts, watermark, text">
+        </div>
+
+        <div class="grid grid-cols-4 gap-2">
+          <div>
+            <label class="text-xs text-gray-500">Width</label>
+            <input x-model.number="singleWidth" type="number" 
+                   class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">Height</label>
+            <input x-model.number="singleHeight" type="number" 
+                   class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">Steps</label>
+            <input x-model.number="singleSteps" type="number" 
+                   class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+          </div>
+          <div>
+            <label class="text-xs text-gray-500">Guidance</label>
+            <input x-model.number="singleGuidance" type="number" step="0.1"
+                   class="w-full px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+          </div>
+        </div>
+
+        <div class="flex items-center gap-4">
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-gray-400">Seed:</label>
+            <input x-model.number="singleSeed" type="number" 
+                   class="w-24 px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none">
+            <label class="flex items-center gap-1 text-xs text-gray-400">
+              <input type="checkbox" x-model="singleFixedSeed" class="rounded border-border bg-surface">
+              Fix
+            </label>
+          </div>
+        </div>
+
+        <button @click="generateSingleImage()" :disabled="generatingSingle"
+                class="px-6 py-2 text-sm bg-accent2 text-white rounded hover:bg-accent2/80 disabled:opacity-40 transition">
+          <span x-show="!generatingSingle">▶ Bild generieren</span>
+          <span x-show="generatingSingle">Generiere...</span>
+        </button>
+
+        <!-- Preview -->
+        <div x-show="singleImageResult" class="pt-4">
+          <img :src="singleImageResult" class="max-h-96 rounded border border-border">
+          <div class="flex gap-2 mt-2">
+            <button class="px-3 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+              Download
+            </button>
+            <button class="px-3 py-1.5 text-xs bg-panel border border-border rounded hover:border-accent">
+              Als Master-Bild speichern
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Master Images Tab -->
+      <div x-show="activeTab === 'master'" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div class="flex justify-between items-center">
+          <h3 class="text-sm font-semibold text-gray-300">Master-Bilder-Verwaltung</h3>
+          <button @click="refreshMasterImages()" class="px-2 py-1 text-xs bg-panel border border-border rounded hover:border-accent">
+            Refresh
+          </button>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <template x-for="img in masterImages" :key="img.key">
+            <div class="bg-panel border border-border rounded p-3">
+              <div class="aspect-video bg-surface rounded mb-2 overflow-hidden">
+                <img :src="img.preview_url" class="w-full h-full object-cover">
+              </div>
+              <div class="flex justify-between items-center">
+                <span class="text-xs font-mono text-accent" x-text="img.key"></span>
+                <div class="flex gap-1">
+                  <button class="px-2 py-0.5 text-xs bg-surface border border-border rounded hover:border-accent">
+                    Ersetzen
+                  </button>
+                  <button @click="deleteMasterImage(img.key)" class="px-2 py-0.5 text-xs bg-err/20 text-err border border-err/30 rounded hover:bg-err/30">
+                    ×
+                  </button>
+                </div>
+              </div>
+            </div>
+          </template>
+          <template x-if="masterImages.length === 0">
+            <p class="text-gray-500 text-sm col-span-2">Keine Master-Bilder vorhanden.</p>
+          </template>
+        </div>
+
+        <!-- Upload New -->
+        <div class="pt-4 border-t border-border">
+          <h4 class="text-xs font-semibold text-gray-400 mb-2">Neues Master-Bild</h4>
+          <div class="flex items-center gap-2">
+            <input x-model="newMasterKey" type="text" 
+                   class="w-48 px-2 py-1 text-sm bg-surface border border-border rounded focus:border-accent focus:outline-none"
+                   placeholder="Key (z.B. elena_front)">
+            <input type="file" @change="handleMasterFileSelect" accept="image/*"
+                   class="flex-1 text-xs text-gray-400">
+            <button @click="uploadMasterImage()" class="px-3 py-1.5 text-sm bg-accent text-white rounded hover:bg-accent/80">
+              Upload
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Right: Log Stream -->
+    <div class="w-96 flex flex-col bg-panel overflow-hidden shrink-0 border-l border-border">
+      <div class="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+        <h3 class="text-sm font-semibold text-gray-300">Log Stream</h3>
+        <button @click="logs = []" class="text-xs text-gray-500 hover:text-white">Clear</button>
+      </div>
+      <div x-ref="logContainer" class="flex-1 overflow-y-auto px-3 py-2 space-y-0">
+        <template x-for="(line, i) in logs" :key="i">
+          <div class="log-line"
+               :class="line.type === 'error' ? 'text-err' : line.type === 'done' ? 'text-ok font-bold' : 'text-gray-300'"
+               x-text="line.data"></div>
+        </template>
+        <template x-if="logs.length === 0">
+          <div class="text-gray-600 text-xs italic">No logs yet.</div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+function imagesApp() {
+  return {
+    // State
+    activeTab: 'dataset',
+    logs: [],
+    
+    // Dataset generation
+    initImagePath: 'test.jpg',
+    previewImage: null,
+    basePrompt: 'Photorealistic portrait of a stunning woman, black pageboy haircut, striking blue eyes, [trigger]',
+    triggerWord: 'sundancer_style',
+    numImages: 20,
+    strength: 0.55,
+    guidance: 1.5,
+    steps: 4,
+    activeLoras: [
+      { name: 'SDXL Lightning (Speed)', enabled: true, strength: 1.0 },
+      { name: 'Add More Details', enabled: true, strength: 0.5 },
+      { name: 'Real Dark Contrast', enabled: true, strength: 0.6 },
+      { name: 'BetterFaces (Anti-AI-Look)', enabled: true, strength: 0.7 },
+      { name: 'Cinematic Photo', enabled: true, strength: 0.5 },
+    ],
+    createVideo: true,
+    useMoonshot: true,
+    moonshotKey: '',
+    generating: false,
+    generationProgress: 0,
+    datasetStatus: { images_count: 0, texts_count: 0, video_exists: false },
+    stackStatus: 'unknown',
+    
+    // Single image
+    singlePrompt: '',
+    singleNegativePrompt: 'blurry, low quality, artifacts, watermark, text',
+    singleWidth: 1024,
+    singleHeight: 1024,
+    singleSteps: 28,
+    singleGuidance: 3.5,
+    singleSeed: 42,
+    singleFixedSeed: false,
+    generatingSingle: false,
+    singleImageResult: null,
+    
+    // Master images
+    masterImages: [],
+    newMasterKey: '',
+    
+    async init() {
+      await Promise.all([
+        this.refreshDatasetStatus(),
+        this.refreshMasterImages(),
+        this.checkStackStatus(),
+      ]);
+    },
+    
+    // --- Dataset ---
+    async refreshDatasetStatus() {
+      try {
+        const r = await fetch('/api/images/dataset/status');
+        this.datasetStatus = await r.json();
+      } catch(e) {
+        this.addLog('error', 'Failed to load dataset status: ' + e.message);
+      }
+    },
+    
+    async checkStackStatus() {
+      try {
+        const r = await fetch('/api/stacks/image');
+        const data = await r.json();
+        this.stackStatus = data.status || 'unknown';
+      } catch(e) {
+        this.stackStatus = 'unknown';
+      }
+    },
+    
+    handleFileSelect(event) {
+      const file = event.target.files[0];
+      if (file) {
+        this.initImagePath = file.name;
+        const reader = new FileReader();
+        reader.onload = (e) => { this.previewImage = e.target.result; };
+        reader.readAsDataURL(file);
+      }
+    },
+    
+    async startDatasetGeneration() {
+      if (this.generating) return;
+      
+      this.generating = true;
+      this.generationProgress = 0;
+      this.logs = [];
+      this.addLog('log', '==> Starte Dataset-Generierung: ' + this.numImages + ' Bilder...');
+      
+      try {
+        // Start SSE stream
+        const url = '/api/images/dataset/stream';
+        const resp = await fetch(url);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, {stream: true});
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop();
+          
+          for (const part of parts) {
+            if (!part.startsWith('data: ')) continue;
+            try {
+              const evt = JSON.parse(part.slice(6));
+              if (evt.type === 'log') {
+                this.addLog('log', evt.data);
+                // Parse progress
+                const match = evt.data.match(/\[(\d+)\/(\d+)\]/);
+                if (match) {
+                  this.generationProgress = parseInt(match[1]);
+                }
+              } else if (evt.type === 'done') {
+                this.addLog(evt.returncode === 0 ? 'done' : 'error',
+                            evt.returncode === 0 ? '==> Abgeschlossen' : '==> Fehlgeschlagen (rc=' + evt.returncode + ')');
+                await this.refreshDatasetStatus();
+              }
+            } catch(e) { /* skip malformed */ }
+          }
+        }
+      } catch(e) {
+        this.addLog('error', 'Connection error: ' + e.message);
+      }
+      
+      this.generating = false;
+    },
+    
+    // --- Single Image ---
+    async generateSingleImage() {
+      if (this.generatingSingle) return;
+      
+      this.generatingSingle = true;
+      this.singleImageResult = null;
+      
+      try {
+        const r = await fetch('/api/images/generate', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            prompt: this.singlePrompt,
+            negative_prompt: this.singleNegativePrompt,
+            width: this.singleWidth,
+            height: this.singleHeight,
+            steps: this.singleSteps,
+            guidance: this.singleGuidance,
+            seed: this.singleFixedSeed ? this.singleSeed : null,
+          }),
+        });
+        const data = await r.json();
+        
+        if (data.ok && data.image_url) {
+          this.singleImageResult = data.image_url;
+        } else {
+          this.addLog('error', 'Generierung fehlgeschlagen: ' + (data.message || 'Unknown error'));
+        }
+      } catch(e) {
+        this.addLog('error', 'Error: ' + e.message);
+      }
+      
+      this.generatingSingle = false;
+    },
+    
+    // --- Master Images ---
+    async refreshMasterImages() {
+      try {
+        const r = await fetch('/api/images/master');
+        const data = await r.json();
+        this.masterImages = data.images.map(img => ({
+          ...img,
+          preview_url: '/api/images/master/' + img.key + '/preview',
+        }));
+      } catch(e) {
+        this.addLog('error', 'Failed to load master images: ' + e.message);
+      }
+    },
+    
+    handleMasterFileSelect(event) {
+      this.selectedMasterFile = event.target.files[0];
+    },
+    
+    async uploadMasterImage() {
+      if (!this.newMasterKey || !this.selectedMasterFile) {
+        this.addLog('error', 'Bitte Key und Datei angeben');
+        return;
+      }
+      
+      const formData = new FormData();
+      formData.append('file', this.selectedMasterFile);
+      
+      try {
+        const r = await fetch('/api/images/master/' + this.newMasterKey, {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Master-Bild uploaded: ' + this.newMasterKey);
+          this.newMasterKey = '';
+          this.selectedMasterFile = null;
+          await this.refreshMasterImages();
+        }
+      } catch(e) {
+        this.addLog('error', 'Upload failed: ' + e.message);
+      }
+    },
+    
+    async deleteMasterImage(key) {
+      if (!confirm('Master-Bild "' + key + '" wirklich löschen?')) return;
+      
+      try {
+        const r = await fetch('/api/images/master/' + key, {
+          method: 'DELETE',
+        });
+        const data = await r.json();
+        
+        if (data.ok) {
+          this.addLog('log', 'Master-Bild gelöscht: ' + key);
+          await this.refreshMasterImages();
+        }
+      } catch(e) {
+        this.addLog('error', 'Delete failed: ' + e.message);
+      }
+    },
+    
+    // --- Log helper ---
+    addLog(type, data) {
+      this.logs.push({type, data});
+      this.$nextTick(() => {
+        const el = this.$refs.logContainer;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+    
+    async saveMoonshotKey() {
+      // Hinweis: In Produktion sollte dies server-side gespeichert werden
+      localStorage.setItem('moonshot_key', this.moonshotKey);
+      this.addLog('log', 'Moonshot API Key gespeichert');
+    },
+  };
+}
+</script>
+{% endblock %}
